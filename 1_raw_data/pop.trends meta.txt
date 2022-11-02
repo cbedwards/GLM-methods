@@ -1,0 +1,2 @@
+pop.trends is the population size estimated by mark-recapture by EC. 
+For our use, we want the "Both" entries, "Total" column

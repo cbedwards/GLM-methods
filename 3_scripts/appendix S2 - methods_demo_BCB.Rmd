@@ -1,0 +1,1048 @@
+---
+title: "Appendix S2, Fitting phenological curves with GLMMs, *Ecology*"
+author: "Collin Edwards and Elizabeth Crone"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+bibliography: appendix-S2.bib
+nocite: |
+  @lme4, @here, @tidyverse
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.height = 8, fig.width = 12)
+```
+
+
+# Summary
+
+In this document we demostrate how to fit guassian curves to unimodal phenology data using linear models. We use published and previously-unpublished data on the Baltimore Checkerspot Butterfly ([@Brown2016; @Brown2017; @Crone2018]) in this example. 
+
+We first fit simple linear models to the data, then elaborate by using the delta method and parametric bootstrapping to provide estimated error bars. We then demonstrate how our method could be used in post-hoc analysis to look at the effects of other covariates - in our case, growing degree days. Finally, we re-present some of the above analysis in functionalized form. Using custom functions cleans up the code and simplifies repeated implementation (e.g. for different data sets with the same column names), but can be less intuitive to read. For completeness, in addition to modeling day of peak abundance $\mu$, activity period $2.57\sigma$, and abundance index $N$, we also model peak activity $h$, defined in Appendix S1: Equation S10a.
+
+Note that while Appendix S2 parallels our analysis of the butterfly data presented in our main text, this is not the complete analysis file. As our data exploration and subsequent analysis is necessarily complicated, we did not feel it would be a good starting place for readers interested in applying our methods to their own data. For our analysis and the functions used to generate all published figures, see Appendix S3. The current document instead walks readers more systematically through the key code needed to use our methods.
+
+This .html file was made from `appendix S2 - methods_demo_BCB.Rmd`, in the `3_scripts` folder of Appendix 4. All necessary files to compile this `.Rmd` file should be in their appropriate folders within Appendix 4.
+
+# Setup
+
+
+## Libraries
+
+```{r message=FALSE, warning=FALSE}
+library(lme4)
+library(msm)
+library(MASS)
+library(here)
+library(tidyverse)
+
+set.seed(1234)
+```
+
+
+## Function definitions
+
+For simplicity we define a few functions that make reading/writing code simpler. 
+
+
+### Standard Edwards' functions
+
+```{r doy_2md}
+## function for turning DOY to month-day for visualization
+doy_2md=function(i){
+  ymd=as.Date(i-1, origin="2019-01-01")
+  return(format(ymd, "%B %d"))
+}
+## example usage:
+# #generate 30 observations from day of year 40 to 150
+# doy=sample(40:150,30)
+# #generate gaussian counts with noise
+# count=exp(-(doy-100)^2/100)+(runif(30)-.5)*.1
+# plot(doy,count)
+# # now plot with day-month references
+# plot(doy,count, xaxt="n")
+# #Make sequence of days to label. Here, 5 days from day 40 to 150
+# at=round(seq(40,150, length=5))
+# axis(1,at=at, labels=doy_2md(at))
+```
+
+```{r color_gradient}
+## Function for making color gradient in R
+color_gradient <- function(x, colors=viridis(256), colsteps=100) {
+  return( colorRampPalette(colors) (colsteps) [ findInterval(x, seq(min(x),max(x), length.out=colsteps)) ] )
+}
+## Example usage:
+#x=runif(100)
+#plot(x=x, y=1/x, pch=19,col=color_gradient(x),
+#     cex.lab=1.6, main="Example of color gradient")
+
+```
+
+```{r t_col}
+## function for making semi-transparent colors
+t_col <- function(color, alpha = 1, name = NULL) {
+  #	  color = color name
+  #	  alpha = fraction of opacity
+  #	   name = an optional name for the color
+  ## Get RGB values for named color
+  rgb.val <- col2rgb(color)
+  ## Make new color using input color as base and alpha set by transparency
+  t.col <- rgb(rgb.val[1], rgb.val[2], rgb.val[3],
+               max = 255,
+               alpha = alpha*255,
+               names = name)
+  ## Save the color
+  invisible(t.col)
+}
+## example usage:
+# library(plotrix)
+#plot(c(1,2),c(1,2),type='l')
+#red.t = t_col(color="red", alpha=.5)
+#draw.circle(x=1.5, y=1.5, radius=.2, col=red.t)
+```
+
+```{r pair panel functions}
+## Functions for making pair plots
+panel.hist <- function(x, ...){
+  # histogram function
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE, breaks=20)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, col = "cyan", ...)
+}
+panel.cor <- function(x, y,
+                      digits = 2,
+                      prefix = "",
+                      cex.cor,
+                      ...){
+  # function to plot pairwise correlations
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r <- abs(cor(x, y, use="complete.obs"))
+  rsigned=cor(x, y, use="complete.obs")
+  p = cor.test(x, y, use="complate.obs")$p.value
+  txt <- format(c(rsigned, 0.123456789), digits = digits)[1]
+  txt <- paste0(prefix, txt)
+  if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+  col="grey"
+  if(p<.1){col="black"}
+  if(p<.05){col="blue"}
+  text(0.5, 0.5, txt, cex = cex.cor *(r+.2)/(r+1), col=col)
+}
+panel.cortest = function(x,y,
+                         digits=2,
+                         prefix="",
+                         cex.cor,
+                         ...){
+  #function to plot p value of correlations
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  p <- signif(cor.test(x, y, use="complete.obs")$p.value,2)
+  if(missing(cex.cor)) cex.cor <- 2
+  col="grey"
+  if(p<.1){col="black"}
+  if(p<.05){col="blue"}
+  text(.5, .5, p, cex=cex.cor, col=col)
+}
+## example usage:
+# x=runif(100)
+# dat=data.frame(x=x,y=x+.5+rnorm(100)*.1, z=x + rnorm(100))
+# pairs(dat,
+#       lower.panel=panel.cor,
+#       diag.panel=panel.hist)
+# pairs(dat,
+#     lower.panel=panel.cortest,
+#     diag.panel=panel.hist,
+#     upper.panel=panel.cor)
+## Function for taking a vector of strings in R and displaying it as bullets in Rmarkdown
+## Note that the chunk needs to be given the argument of results='asis'
+```
+
+```{r printer}
+printer=function(x){
+  ## x needs to be a vector of strings.
+  com=as.character(x)
+  com=com[com!=""]
+  com=gsub("\n","",com)
+  cat(paste('-', com), sep = '\n') 
+}
+# example usage:
+# ```{r results='asis'}
+#    printer(1:3)
+# ```
+```
+
+```{r fig_starter}
+## Function for making figs with metadata. Note: you will want to change figfold and scriptname default values to be appropriate for this document.
+fig_starter=function(filename, #name of figure file to save as WITHOUT SUFFIX
+                     description, #vector of strings, each will be put in its own line of meta file
+                     ##  Note: generating file is defined in the function, date and time is automatically added.
+                     ##default figure info:
+                     width=12,
+                     height=8,
+                     units="in",
+                     res=300,
+                     figfold="5_figs",
+                     scriptname="appendix s2 - methods_demo_BCB.Rmd"
+){
+  #function to automate making a jpeg figure (can change code here to make png)
+  #and also add meta text
+  #NOTE: still have to use dev.off() at the end of plot-making
+  
+  ## save meta file
+  cat(c(description,
+        "",##easy way to add an extra line to separate description for basic data.
+        paste("from",scriptname),
+        as.character(Sys.time())),
+      sep="\n",
+      file=here(figfold, paste(filename,"_meta.txt", sep=""))
+  )
+  
+  ## open jpeg device
+  jpeg(file=here(figfold,paste(filename,".jpg", sep="")),
+       width=width, 
+       height=height, 
+       units=units, 
+       res=res)
+}
+## Example usage:
+# fig_starter(filename="testfig", description=c("This figure was made as an example.","We can add endless lines of description."))
+# plot(1:10,1:10, pch=1:10)
+# dev.off()
+## Note: in this case the example will not work for you unless you give it the correct location for "figfold" - the relative file path to the folder for your figures.
+```
+
+```{r gfig_saver}
+# function for saving ggplot figures and metadata. As fig_starter (which is for base graphics), except that saving ggfigures is inherently cleaner, as you are not feeding commands to an open graphics device
+
+gfig_saver=function(gfig, #object to be saved
+                    filename, #name of figure file to save as WITHOUT SUFFIX
+                    description, #vector of strings, each will be put in its own line of meta file
+                    ##  Note: generating file is defined in the function, date and time is automatically added.
+                    ##default figure info:
+                    width=12,
+                    height=8,
+                    units="in",
+                    figfold="5_figs",
+                    scriptname="appendix s2 - methods_demo_BCB.Rmd"
+){
+  ## save meta file
+  cat(c(description,
+        "",##easy way to add an extra line to separate description for basic data.
+        paste("from",scriptname),
+        as.character(Sys.time())),
+      sep="\n",
+      file=here(figfold, paste(filename,"_meta.txt", sep=""))
+  )
+  ggsave(filename=here(figfold, paste(filename,".jpg", sep="")),
+         plot=gfig,
+         device="jpeg",
+         width=width, height=height, units=units
+  )
+}
+```
+
+### Project-specific functions
+
+```{r coefs_unscaled}
+## Function for reversing scaling of coefficient estimates
+coefs_unscaled = function(fixefs, mean, sd){
+  #fixefs: the 3 coefficients of the regression fitted to scaled predictor
+  #  in either matrix/data frame form or vector form
+  #mean: mean of original unscaled predictor
+  #sd: sd of original unscaled predictor
+  ## the equations below can be obtained by doing the algebra
+  ## based on the transformation of scaling
+  
+  #if a vector, turn into a 1-row matrix
+  if(is.null(nrow(fixefs))){
+    fixefs=matrix(fixefs, nrow=1) 
+  }
+  fixefs[,1] <- fixefs[,1] - fixefs[,2] * mean / sd + fixefs[,3] * mean^2 / sd^2
+  fixefs[,2] <- fixefs[,2] / sd - 2 * fixefs[,3] * mean / sd^2
+  fixefs[,3] <- fixefs[,3] / sd^2
+  colnames(fixefs)=c("beta0", "beta1", "beta2")
+  return(fixefs)
+}
+```
+
+# Data wrangling
+
+`BCBCounts v2.csv` contains the necessary data for our analysis. Columns are as follows:
+
+- `year`: year of measurement. We use this as our blocking factor
+- `date`: day of year, in mm/dd/yyyy format
+- `count`: number of Baltimore Checkerspot butterflies observed that day
+- `DOY`: day of year, in integer format
+
+We add a scaled day of year (DOY) variable, `DOYsc`. We use this because numerical solvers have trouble simultaneously fitting DOY and DOY^2, as they are very different scales.
+
+
+```{r}
+BCB = read.csv(here("1_raw_data","BCBcounts v2.csv"))
+BCB$uqID = rownames(BCB) # identifier for overdispersed poisson
+BCB$DOYsc=scale(BCB$DOY, scale=T)
+## For unscaling, we will need to use mean() and sd() of $DOY. We do this as needed below.
+```
+
+# Fitting linear models
+
+## Fit the models
+
+Here we explore models with and without overdispersion using an individual-level random effect. We use a poisson family, which by default uses a log-link function, ensuring our quadratic linear model is describing a gaussian curve.
+
+```{r}
+## Correct model:
+
+## scaled model, no individual RE
+m0 = glmer(count ~ DOYsc + I(DOYsc*DOYsc) + (DOYsc + I(DOYsc*DOYsc)|year), family = poisson, data = BCB)
+summary(m0)
+
+## scaled model, individual RE
+mID = glmer(count ~ DOYsc + I(DOYsc*DOYsc) + (DOYsc + I(DOYsc*DOYsc)|year) + (1|uqID), family = poisson, data = BCB)
+summary(mID)
+
+AIC(m0, mID)
+```
+
+Looking at AIC, we see that including an individual-level effect drammatically improves model fit. For all further analyses, we use that model. As we note in the main text, since both linear and quadratic terms are necessary to define the gaussian curve, we cannot use model selection to simplify our covariates in any of these cases.
+
+For simplicity, we will define `mfin` as fitted model of our final model choice.
+
+```{r}
+mfin=mID
+```
+
+`coefficients(mfin)` provides estimated coefficients for individual (`$uqID`) and year (`$year`) blocking factors, combining fixed and random effects as appropriate. This means that `coefficients(mfin)$year` shows the best estimates of our three coefficients for that year.
+
+Note that because we are fitting using scaled day of year (`DOYsc`) in our predictors, our coefficients are similarly scaled. We have done the algebra involved to unscale the coefficients, which is based on scaled coefficients and the mean and variance of the original, unscaled day of year. Because this is used repeatedly, we have written it in function form, we have written the function `coefs_unscaled()`, which takes either a vector of $\beta_0$, $\beta_1$, $\beta_2$, or a matrix or data frame with the first column holding $\beta_0$, the second $\beta_1$, and the third $\beta_2$. While the underlying math is simple and easily replicated (just walking through some algebra), this function should be relevant for any model-fitting using our method and scaled time units.
+
+With all this in mind, we can calculate our unscaled coefficients $\beta_0$, $\beta_1$, $\beta_2$ with the following command:
+
+```{r}
+coefs_unscaled(coefficients(mfin)$year,
+               mean=mean(BCB$DOY),
+               sd=sd(BCB$DOY))
+```
+
+
+
+## Plot data points
+
+```{r}
+par(mfrow=c(2,4))
+use.xlim=c(170,210)#range of x to plot
+for(year.cur in 2012:2019){
+  usedat = BCB[BCB$year == year.cur,]
+  plot(usedat$DOY, usedat$count, pch=1, main=year.cur, xaxt='n',
+       xlim=use.xlim, 
+       ylim=c(0,max(usedat$count)*1.1),
+       xlab="",
+       ylab="Observed counts",
+       cex.axis=1.5, 
+       cex.lab=1.5)
+  xtick=round(seq(use.xlim[1], use.xlim[2], length=5))
+  axis(side=1,at=xtick, label=doy_2md(xtick), cex.axis=1.5)
+}
+```
+
+## Plot data points with model fits
+
+Here we use `coefs_unscaled()` to produce unscaled coefficient estimates for each year, and then use Equation 2,
+
+\[f(x) = e^{\beta_0+\beta_1x+\beta_2x^2}\]
+
+to calculate model predictions.
+
+```{r}
+par(mfrow=c(2,4))
+use.xlim=c(170,210)#range of x to plot
+
+## To plot data fit, we create a sequence of x points to predict at
+x.pred=seq(use.xlim[1],use.xlim[2], by=.01)
+
+#loop through each year, and make individual plots
+for(year.cur in 2012:2019){
+  #subset to current year
+  usedat = BCB[BCB$year == year.cur,]
+  
+  #plot data points
+  plot(usedat$DOY, usedat$count, pch=1, main=year.cur, xaxt='n',
+       xlim=use.xlim, 
+       ylim=c(0,max(usedat$count)*1.1),
+       xlab="",
+       ylab="Observed counts",
+       cex.axis=1.5, 
+       cex.lab=1.5)
+  #use doy_2md to plot x axis in readable format
+  xtick=round(seq(use.xlim[1], use.xlim[2], length=5))
+  axis(side=1,at=xtick, label=doy_2md(xtick), cex.axis=1.5)
+  
+  ## Add predicted points
+  coef.cur=coefficients(mfin)$year
+  coef.cur=coef.cur[rownames(coef.cur)==year.cur,]
+  coef.cur=coefs_unscaled(coef.cur, mean(BCB$DOY), sd(BCB$DOY))
+  y.pred=exp(coef.cur[[1]] + coef.cur[[2]]*x.pred + coef.cur[[3]]*x.pred^2)
+  points(x.pred, y.pred, type='l', col='blue')
+}
+```
+
+## Calculating phenological metrics simply
+
+If we aren't worried about confidence intervals, we can easily calculate our phenological metrics using our coefficient predictions and equations 4, 5, and 6, and Appendix 1: Equation S10a. Remember that R starts indexing at 1, and in our equations we start indexing beta at 0, so the numbering may look off by 1 when comparing the two.
+
+```{r}
+
+betas = coefs_unscaled(coefficients(mfin)$year,
+                       mean=mean(BCB$DOY),
+                       sd=sd(BCB$DOY))
+
+## first year has coefficients as follows:
+cur.betas=as.numeric(betas[1,]) #coercing from data frame to vector for simplicity in indexing later
+
+## Mean day of activity, Equation 4:
+pheno.mu= -cur.betas[2]/(2*cur.betas[3])
+pheno.mu
+## Standard deviation of activity, Equation 5:
+pheno.sigma=sqrt(-1/(2*cur.betas[3]))
+pheno.sigma
+## "activity period, derived from standard deviation and mean":
+
+pheno.activity = qnorm(.9, mean=pheno.mu, sd=pheno.sigma) - 
+  qnorm(.1, mean=pheno.mu, sd=pheno.sigma) #this can be written more simply, but this is perhaps clearest.
+pheno.activity
+
+##Abundance index N, equation 6:
+pheno.N=sqrt(2*pi/(-2*cur.betas[3]))*exp(cur.betas[1]+(cur.betas[2]^2)/(-4*cur.betas[3]))
+pheno.N
+
+## peak abundance h, equation 7:
+## note: we could plug equation 4 into all of the `pheno.mu` calls below, but since we've already calculated that quantity, it's easier to reuse it.
+pheno.h=exp(cur.betas[1] + cur.betas[2]*pheno.mu + cur.betas[3]*pheno.mu^2)
+pheno.h
+```
+
+Conveniently, we can calculate phenology metrics for all years simultaneously because of R's vectorized approach. For simplicity, we will store these in `pheno.res`. We will skip activity period calculations this time for simplicity; any derived metrics like that can be calculated from the data frame.
+
+```{r}
+betas = coefs_unscaled(coefficients(mfin)$year,
+                       mean=mean(BCB$DOY),
+                       sd=sd(BCB$DOY))
+pheno.res=data.frame(year=rownames(betas),
+                     mu=numeric(nrow(betas)),
+                     sigma=numeric(nrow(betas)),
+                     N=numeric(nrow(betas)),
+                     h=numeric(nrow(betas))
+)
+
+
+pheno.res$mu= -betas[,2]/(2*betas[,3])
+pheno.res$sigma=sqrt(-1/(2*betas[,3]))
+pheno.res$N=sqrt(2*pi/(-2*betas[,3]))*exp(betas[,1]+(betas[,2]^2)/(-4*betas[,3]))
+pheno.res$h=exp(betas[,1] + betas[,2]*pheno.res$mu + betas[,3]*pheno.res$mu^2)
+pheno.res
+```
+
+
+## Estimating error 
+
+As stated in the main text, our approach does not automatically give us appropriate confidence intervals for our phenological metrics. In fact, it doesn't give us appropriate confidence intervals for the unscaled coefficients either. 
+
+We present two approaches to estimating confidence of derived parameters (e.g. our phenological metrics, which derive from coefficients for which we *do* have estimated error). In both cases they use the variance-covariance matrix of our coefficient estimates from the fitted model.
+
+The delta method uses a taylor series approximation to take the variance-covariance matrix of the original model fit and calculate what it should be for the derived parameter(s). This is computationally efficient, but relies on several assumptions, notably that the error of the derived parameters is normally destributed, and so symmetrical around our estimates. In cases with high error and bounded feasible results (e.g. abundance index, which can't reasonably be negative but has high variance in our data), the resulting error bars may look a little odd. We have found this symmetry assumption to outweigh the speed of this approach, but your mileage may vary. The **msm** package implements the delta method in R [@msm].
+
+Parametric bootstrapping generates hypoethetical alternative estimates based on our coefficient estimates and variance-covariance matrix of the same. This, in effect, represents what we would expect if we repeatedly fit different data sets from the same underlying distribution of data. Since we can calculate derived metrics for each of these simulated coefficient combinations, we can (a) generate a large number (e.g. 10,000) coefficient combinations, (b) calculate our derived parameters of interest as if those coefficient combinations were our actual model fits, and (c) find the 0.025 and 0.975 quantiles to define our 95% confidence interval, or 0.16 and 0.84 for +/- one standard error. The **MASS** package implements parametric bootstrapping in R [@MASS].
+
+
+We should note that finding the variance-covariance matrix for the yearly estimates that incorporate both fixed and random effects is non-trivial. If you're willing to assume independence of the conditional variance and the fixed-effect sampling variance, then the variance of the intercepts for each group would be the sum of the fixed-effect intercept variance and the conditional variance of the intercept for each group. See <https://bbolker.github.io/mixedmodels-misc/glmmFAQ.html#confidence-intervals-on-conditional-meansblupsrandom-effects>.
+
+So, to get the variance-covariance estimates for either of our methods we use
+
+```{r}
+cv = ranef(mID, condVar = TRUE)
+vcov(mfin) + attr(cv$year, "postVar")[,,1]
+```
+
+and change the number at the end to point to the index of the year of interest.
+
+
+### Delta Method
+
+Note that because we are using the coefficient estimates and variance-covariance matrices of individual years, we are looping through and operating on a single year at time. We will store the resulting estimated errors in the data frame `delta.res`.
+
+First, an example for a single year. We will use the first year, 2012
+
+```{r}
+#covariance of random effects
+cv = ranef(mfin, condVar = TRUE)
+i=1 #since this is the first year
+cur.mean=coef(mfin)$year[i,] #scaled means
+#unscale the means
+cur.est=coefs_unscaled(cur.mean, mean(BCB$DOY), sd(BCB$DOY))
+
+## using the delta method is a little complicated. First we must use it to get the error estimates of our unscaled coefficients.
+
+# We write formulas ahead of time, using sprintf to plug in the means and standard deviaitons of our data sets. This is, in essense, another way of writing the math in coefs_unscaled()
+# the deltamethod() function uses x1, x2, ... to denote the original variables
+
+form1=sprintf("~ x1 - x2 * %f / %f + x3 * %f^2 / %f ^2",
+              mean(BCB$DOY),
+              sd(BCB$DOY),
+              mean(BCB$DOY),
+              sd(BCB$DOY)
+)
+form2=sprintf("~ x2/%f - 2 * x3 * %f / %f ^2",
+              sd(BCB$DOY),
+              mean(BCB$DOY),
+              sd(BCB$DOY)
+)
+form3=sprintf("~ x3 / %f ^2",
+              sd(BCB$DOY)
+)
+
+## Now for the actual function call. By default deltamethod returns the standard errors.
+##   by giving ses=F, we instead tell the function to return the variance-covariance matrix of the derived parameters
+cur.cov=deltamethod(list(as.formula(form1),
+                         as.formula(form2),
+                         as.formula(form3)),
+                    mean=cur.mean, #estimates
+                    cov=vcov(mID) + attr(cv$year, "postVar")[,,i], #estimated vcov matrix
+                    ses=F #give us a vcov matrix instead of standard errors
+)
+## now cur.cov is the estimated variance-covariance matrix of our unscaled parameters beta0, beta1, beta2. We can now use *this* to calculate standard error estimates of our derived parameters. Note that since, by default, deltamethod returns the standard errors of the estimates, that's what we get here.
+
+## day of mean abundance (mu)
+# error estimate
+cur.muse=deltamethod(~ x2/(-2 * x3),
+                     mean=as.numeric(cur.est),
+                     cov=cur.cov
+)
+## standard deviation of activity (sigma)
+cur.sigmase=deltamethod(~ sqrt(1 / (-2* x3)),
+                        mean=as.numeric(cur.est),
+                        cov=cur.cov)
+## Abundance index (N)
+cur.Nse=deltamethod(~sqrt(2*pi/(-2*x3))*exp(x1+(x2^2)/(-4*x3)),
+                    mean=as.numeric(cur.est),
+                    cov=cur.cov)
+# peak abundance (h)
+cur.hse=deltamethod(~exp(x1 + x2*x2/(-2 * x3) + x3 * (x2/(-2 * x3))^2),
+                    mean=as.numeric(cur.est),
+                    cov=cur.cov)
+```
+
+
+Now, implemented in a loop. For comparison with parametric bootstrapping below, we time this operation.
+
+```{r}
+time.start=proc.time()
+delta.res=data.frame(year=rownames(coef(mfin)$year),
+                     mu.se=numeric(nrow(coef(mfin)$year)),
+                     sigma.se=numeric(nrow(coef(mfin)$year)),
+                     N.se=numeric(nrow(coef(mfin)$year)),
+                     h.se=numeric(nrow(coef(mfin)$year))
+)
+for(i in 1:nrow(coef(mfin)$year)){
+  cur.mean=coef(mfin)$year[i,] #scaled means
+  ## first unscale coefficients:
+  cur.est=coefs_unscaled(cur.mean, mean(BCB$DOY), sd(BCB$DOY))
+  ## get estimate from unscaled model
+  form1=sprintf("~ x1 - x2 * %f / %f + x3 * %f^2 / %f ^2",
+                mean(BCB$DOY),
+                sd(BCB$DOY),
+                mean(BCB$DOY),
+                sd(BCB$DOY)
+  )
+  form2=sprintf("~ x2/%f - 2 * x3 * %f / %f ^2",
+                sd(BCB$DOY),
+                mean(BCB$DOY),
+                sd(BCB$DOY)
+  )
+  form3=sprintf("~ x3 / %f ^2",
+                sd(BCB$DOY)
+  )
+  
+  cur.cov=deltamethod(list(as.formula(form1),
+                           as.formula(form2),
+                           as.formula(form3)),
+                      mean=cur.mean,
+                      cov=vcov(mID) + attr(cv$year, "postVar")[,,i],
+                      ses=F
+  )
+  cur.ses=deltamethod(list(as.formula(form1),
+                           as.formula(form2),
+                           as.formula(form3)),
+                      mean=cur.mean,
+                      cov=vcov(mID) + attr(cv$year, "postVar")[,,i],
+                      ses=T
+  )
+  delta.res$mu.se[i]=deltamethod(~ x2/(-2 * x3),
+                                 mean=as.numeric(cur.est),
+                                 cov=cur.cov
+  )
+  delta.res$sigma.se[i]=deltamethod(~ sqrt(1 / (-2* x3)),
+                                    mean=as.numeric(cur.est),
+                                    cov=cur.cov)
+  delta.res$N.se[i]=deltamethod(~sqrt(2*pi/(-2*x3))*exp(x1+(x2^2)/(-4*x3)),
+                                mean=as.numeric(cur.est),
+                                cov=cur.cov)
+  delta.res$h.se[i]=deltamethod(~exp(x1 + x2*x2/(-2 * x3) + x3 * (x2/(-2 * x3))^2),
+                                mean=as.numeric(cur.est),
+                                cov=cur.cov)
+}
+proc.time()-time.start
+```
+
+This takes around a third of a second on my computer.
+
+### Parametric Bootstrapping
+
+Here we will generate 10,000 simulated coefficients for each year, calculate the derived metrics, and then use quantile() to find our confidence intervals. For completeness, we will calculate the 95% Confidence Interval, but also +/- 1 standard error (for easier comparison to the delta method). We will save the simulated data in the list `dat.sim` (one entry per year, each entry is a data frame of 10000 simulated coefficient values and derived parameters), and the four quantile points for each of our metrics in the data frame `boot.res`
+
+We start by calculating for our first single year, 2012.
+
+```{r}
+nsample = 10000 #number of samples for bootstrapping
+i=1
+cur.mean=coef(mID)$year[i,] #scaled means
+## first unscale coefficients:
+cur.est=coefs_unscaled(cur.mean, mean(BCB$DOY), sd(BCB$DOY))
+sim=mvrnorm(n = nsample, #how many samples to generate
+            mu = as.numeric(coef(mID)$year[i,]), # means of estimates
+            Sigma = as.matrix(vcov(mID) +
+                                attr(ranef(mID, condVar = T)$year,   "postVar")[,,i]) #vcov matrix of our original estimates
+)
+
+#now `sim` contains 10,000 samples of what we *might* have estimated, based on our actual estimates and vcov matrix.
+
+#first we unscale this, using coefs_unscaled(). Remember, this can take a matrix!
+sim.unsc=coefs_unscaled(sim, 
+                        mean=mean(BCB$DOY),
+                        sd=sd(BCB$DOY)
+)
+#calculate the day of mean activity for each of these simulated points
+sim.mu= -sim.unsc[,2]/(2*sim.unsc[,3])
+sim.sigma=sqrt(-1/(2*sim.unsc[,3]))
+sim.N=sqrt(2*pi/(-2*sim.unsc[,3]))*exp(sim.unsc[,1]+(sim.unsc[,2]^2)/(-4*sim.unsc[,3]))
+sim.h=exp(sim.unsc[,1] + sim.unsc[,2]*sim.mu + sim.unsc[,3]*sim.mu^2)
+
+#now sim.mu effectively represents a sampling of possible N estimates. If we want the 95% CI of that, we can get it easily with quantile():
+
+quantile(sim.mu, probs=c(0.025, 0.975))
+
+## similarly, we can calulate the quantiles corresponding to +/- 1 standard deviation as follows:
+quantile(sim.mu, probs=c(pnorm(-1), pnorm(1)))
+## note that since sim.mu is sampling a distribution, our quantiles here are equivalent to the standard errors of the delta method above.
+
+## we could also imagine storing the coefficients and derived parameters in a single data frame for later. This is useful for post-hoc analyses.
+
+sim.store=cbind(sim, sim.unsc, sim.mu, sim.sigma, sim.N, sim.h)
+```
+
+We can elaborate on the example above, using a `for` loop to handle all years. For comparison, we time this operation
+
+```{r}
+time.start=proc.time()
+
+## place to store simulated data:
+dat.sim=list()
+## place to store results. For clarity, using numbers to show the quantiles stored.
+boot.res=data.frame(year=as.numeric(rownames(coef(mfin)$year)),
+                    mu.025=numeric(nrow(coef(mfin)$year)),
+                    mu.975=numeric(nrow(coef(mfin)$year)),
+                    mu.16=numeric(nrow(coef(mfin)$year)),
+                    mu.84=numeric(nrow(coef(mfin)$year)),
+                    sigma.025=numeric(nrow(coef(mfin)$year)),
+                    sigma.975=numeric(nrow(coef(mfin)$year)),
+                    sigma.16=numeric(nrow(coef(mfin)$year)),
+                    sigma.84=numeric(nrow(coef(mfin)$year)),
+                    N.025=numeric(nrow(coef(mfin)$year)),
+                    N.975=numeric(nrow(coef(mfin)$year)),
+                    N.16=numeric(nrow(coef(mfin)$year)),
+                    N.84=numeric(nrow(coef(mfin)$year)),
+                    h.025=numeric(nrow(coef(mfin)$year)),
+                    h.975=numeric(nrow(coef(mfin)$year)),
+                    h.16=numeric(nrow(coef(mfin)$year)),
+                    h.84=numeric(nrow(coef(mfin)$year))
+)
+
+nsample = 10000 #number of samples for bootstrapping
+cv = ranef(mID, condVar = TRUE)
+
+
+for(i in 1:nrow(coef(mID)$year)){
+  cur.year=rownames(coef(mfin)$year)[i]
+  cur.mean=coef(mfin)$year[i,] #scaled means
+  ## first unscale coefficients:
+  cur.est=coefs_unscaled(cur.mean, mean(BCB$DOY), sd(BCB$DOY))
+  ## get estimate from unscaled model
+  
+  #make simulted data
+  sim=mvrnorm(n = nsample, mu = as.numeric(coef(mID)$year[i,]),
+              Sigma = as.matrix(vcov(mID) +
+                                  attr(ranef(mID, condVar = T)$year, "postVar")[,,i])
+  )
+  sim.unsc=coefs_unscaled(sim, 
+                          mean=mean(BCB$DOY),
+                          sd=sd(BCB$DOY)
+  )
+  #calculate the day of mean activity for each of these simulated points
+  sim.mu= -sim.unsc[,2]/(2*sim.unsc[,3])
+  sim.sigma=sqrt(-1/(2*sim.unsc[,3]))
+  sim.N=sqrt(2*pi/(-2*sim.unsc[,3]))*exp(sim.unsc[,1]+(sim.unsc[,2]^2)/(-4*sim.unsc[,3]))
+  sim.h=exp(sim.unsc[,1] + sim.unsc[,2]*sim.mu + sim.unsc[,3]*sim.mu^2)
+  #store results:
+  boot.res$mu.025[i]=quantile(sim.mu, probs=0.025)
+  boot.res$mu.975[i]=quantile(sim.mu, probs=0.975)
+  boot.res$mu.16[i]=quantile(sim.mu, probs=pnorm(-1))
+  boot.res$mu.84[i]=quantile(sim.mu, probs=pnorm(1))
+  boot.res$sigma.025[i]=quantile(sim.sigma, probs=0.025)
+  boot.res$sigma.975[i]=quantile(sim.sigma, probs=0.975)
+  boot.res$sigma.16[i]=quantile(sim.sigma, probs=pnorm(-1))
+  boot.res$sigma.84[i]=quantile(sim.sigma, probs=pnorm(1))
+  boot.res$N.025[i]=quantile(sim.N, probs=0.025)
+  boot.res$N.975[i]=quantile(sim.N, probs=0.975)
+  boot.res$N.16[i]=quantile(sim.N, probs=pnorm(-1))
+  boot.res$N.84[i]=quantile(sim.N, probs=pnorm(1))
+  boot.res$h.025[i]=quantile(sim.h, probs=0.025)
+  boot.res$h.975[i]=quantile(sim.h, probs=0.975)
+  boot.res$h.16[i]=quantile(sim.h, probs=pnorm(-1))
+  boot.res$h.84[i]=quantile(sim.h, probs=pnorm(1))
+  ## save a data frame of the simulated data and derived parameters
+  ##   to our dat.sim list
+  dat.sim[[paste0("y",cur.year)]]=cbind(sim, sim.unsc, sim.mu, sim.sigma, sim.N, sim.h)
+}
+proc.time()-time.start
+```
+
+This takes slightly longer than the delta method, but not substantially more on my computer. 
+
+## Plotting phenology estimates and errors
+
+Here we will plot the estimated phenological metrics +/- 1 standard error, with errors calculated using red (delta method) and blue (bootstrapping).
+
+```{r fig.height=10, fig.width=10}
+par(mfrow=c(2,2), mar=c(6,6,5,2))
+
+## day of mean abundance, mu
+plot(as.numeric(as.character(pheno.res$year)),
+     pheno.res$mu,
+     pch=19,
+     ylim=range(c(pheno.res$mu+delta.res$mu.se, #max delta values
+                  boot.res$mu.975, #max boot values
+                  pheno.res$mu-delta.res$mu.se, #min delta values
+                  boot.res$mu.025 #min boot values
+                  )),
+     xlab="year",
+     ylab="day of peak activity, mu", 
+     cex.axis=1.5,
+     cex.lab=1.6)
+title("Day of peak activity", adj = 0, line=0.4, cex.main=1.6)
+points(as.numeric(as.character(pheno.res$year))+.1,
+     pheno.res$mu,
+       col='black',
+       pch=19)
+# error for delta method
+segments(x0=as.numeric(as.character(pheno.res$year)),
+         y0=pheno.res$mu+delta.res$mu.se,
+        y1=pheno.res$mu-delta.res$mu.se,
+        col='indianred'
+)
+# error for bootstraps
+segments(x0=as.numeric(as.character(pheno.res$year))+.1,
+         y0=boot.res$mu.16,
+        y1=boot.res$mu.84,
+        col='cornflowerblue'
+)
+legend("topleft",
+       legend=c("delta method","bootstraps"),
+       fill=c("indianred","cornflowerblue"),
+       cex=1.5)
+
+## activity variance, sigma
+plot(as.numeric(as.character(pheno.res$year)),
+     pheno.res$sigma,
+     pch=19,
+     ylim=range(c(pheno.res$sigma+delta.res$sigma.se, #max delta values
+                  boot.res$sigma.975, #max boot values
+                  pheno.res$sigma-delta.res$sigma.se, #min delta values
+                  boot.res$sigma.025 #min boot values
+                  )),
+     xlab="year",
+     ylab="standard deviation, sigma", 
+     cex.axis=1.5,
+     cex.lab=1.6)
+title("standard deviation, sigma", adj = 0, line=0.4, cex.main=1.6)
+points(as.numeric(as.character(pheno.res$year))+.1,
+     pheno.res$sigma,
+       col='black',
+       pch=19)
+# error for delta method
+segments(x0=as.numeric(as.character(pheno.res$year)),
+         y0=pheno.res$sigma+delta.res$sigma.se,
+        y1=pheno.res$sigma-delta.res$sigma.se,
+        col='indianred'
+)
+# error for bootstraps
+segments(x0=as.numeric(as.character(pheno.res$year))+.1,
+         y0=boot.res$sigma.16,
+        y1=boot.res$sigma.84,
+        col='cornflowerblue'
+)
+
+## Abundance estimate, N
+plot(as.numeric(as.character(pheno.res$year)),
+     pheno.res$N,
+     pch=19,
+     ylim=range(c(pheno.res$N+delta.res$N.se, #max delta values
+                  boot.res$N.975, #max boot values
+                  pheno.res$N-delta.res$N.se, #min delta values
+                  boot.res$N.025 #min boot values
+                  )),
+     xlab="year",
+     ylab="Abundance index, N", 
+     cex.axis=1.5,
+     cex.lab=1.6)
+title("Abundance index, N", adj = 0, line=0.4, cex.main=1.6)
+points(as.numeric(as.character(pheno.res$year))+.1,
+     pheno.res$N,
+       col='black',
+       pch=19)
+# error for delta method
+segments(x0=as.numeric(as.character(pheno.res$year)),
+         y0=pheno.res$N+delta.res$N.se,
+        y1=pheno.res$N-delta.res$N.se,
+        col='indianred'
+)
+# error for bootstraps
+segments(x0=as.numeric(as.character(pheno.res$year))+.1,
+         y0=boot.res$N.16,
+        y1=boot.res$N.84,
+        col='cornflowerblue'
+)
+
+## peak abundance, h
+plot(as.numeric(as.character(pheno.res$year)),
+     pheno.res$h,
+     pch=19,
+     ylim=range(c(pheno.res$h+delta.res$h.se, #max delta values
+                  boot.res$h.975, #max boot values
+                  pheno.res$h-delta.res$h.se, #min delta values
+                  boot.res$h.025 #min boot values
+                  )),
+     xlab="year",
+     ylab="peak abundance, h", 
+     cex.axis=1.5,
+     cex.lab=1.6)
+title("peak abundance, h", adj = 0, line=0.4, cex.main=1.6)
+points(as.numeric(as.character(pheno.res$year))+.1,
+     pheno.res$h,
+       col='black',
+       pch=19)
+# error for delta method
+segments(x0=as.numeric(as.character(pheno.res$year)),
+         y0=pheno.res$h+delta.res$h.se,
+        y1=pheno.res$h-delta.res$h.se,
+        col='indianred'
+)
+# error for bootstraps
+segments(x0=as.numeric(as.character(pheno.res$year))+.1,
+         y0=boot.res$h.16,
+        y1=boot.res$h.84,
+        col='cornflowerblue'
+)
+```
+
+## Plotting fitted curves with bootstrapped errors
+
+Each of our 10,000 simulated fits for each year represent possible fits. To provide error curves, we generate the model predictions for each of those simulated fits along a grid of time points, use quantiles to find the desired cofidence intervals at each grid point, and then connected the dots with plotting functions.
+
+```{r}
+par(mfrow=c(2,4))
+use.xlim=c(170,210)#range of x to plot
+for(year.cur in 2012:2019){
+  yearname=paste0("y",year.cur) #matches the naming convention in dat.sim
+  #subset our data
+  usedat = BCB[BCB$year == year.cur,]
+  #generate a sequence of values to predict at
+  x.pred=seq(use.xlim[1],use.xlim[2], by=.1)
+  #make grid to fill with estimates - each row is one sim, each col is a grid point
+  grid=matrix(-99,
+              ncol=length(x.pred), 
+              nrow=nrow(dat.sim[[paste0("y",year.cur)]]))
+  #look through columns (for speed). Probably a vectorizable way of doing this.
+  for(i.col in 1:ncol(grid)){
+    #calculate equation 2 in the main text
+    #note that beta0, beta1, and beta2 are the names of the unscaled coefficients calculated in the previous section
+    grid[,i.col] = exp(dat.sim[[yearname]][,"beta0"] + 
+                         dat.sim[[yearname]][,"beta1"]*x.pred[i.col] +
+                         dat.sim[[yearname]][,"beta2"]*x.pred[i.col]^2)
+  }
+  #apply quantiles to all grid points at once
+  CI=apply(grid,2, quantile, probs= pnorm(c(-1,1)))
+  #draw fitted line
+  coef.cur=coefficients(mfin)$year
+  coef.cur=coef.cur[rownames(coef.cur)==year.cur,]
+  coef.cur=coefs_unscaled(coef.cur, mean(BCB$DOY), sd(BCB$DOY))
+  y.pred=exp(coef.cur[[1]] + coef.cur[[2]]*x.pred + coef.cur[[3]]*x.pred^2)
+  
+  ## Do the plotting
+  plot(x.pred, CI[2,], pch=1,
+       # main=year.cur, 
+       xaxt='n',
+       type='n',
+       xlim=use.xlim,
+       xlab="",
+       ylab="Observed counts",
+       cex.axis=1.6, cex.lab=1.6)
+  # again make human-readable x axis
+  xtick=round(seq(use.xlim[1], use.xlim[2], length=5))
+  axis(side=1,at=xtick, label=doy_2md(xtick), cex.axis=1.6)
+  title(year.cur,
+        adj = 0, line=0.4, cex.main=1.8)
+  points(x.pred, y.pred, type='l', col='blue')
+  #add our error bars
+  points(x.pred, CI[1,], type='l', lty=2, col="darkgray")
+  points(x.pred, CI[2,], type='l', lty=2, col="darkgray")
+  points(usedat$DOY, usedat$count, pch=19)
+}
+```
+
+# Post-hoc analysis
+
+We want to demonstrate how to analyze phenological metrics as a function of some other covariate. As warmth often affects butterfly development, we will use cumulative growingyearly warmth here.
+
+## Covariate: GDD10
+
+
+We start by calculating growing degrees with developmental zero of 10 C (GDD10) from the NOAA climate data file, `dailey-measures.csv` [@noaa]. We use the ashburn station (USC00190190), as it is the closest to our study site (~25 mi). We will use GDD10 on July 1 as a measure for the warmth butterflies experienced that year.
+
+We will follow one of several methods of calculating growing degree days: each day's incremental increase is average of minimum and maximum of that day minus the base temperature (in our case 10). If that number would be negative, it's instead set to 0.
+
+```{r}
+
+raw=read.csv(here("1_raw_data", "daily-measures.csv"))
+## filter to our station
+dat.use=raw[raw$STATION=="USC00190190",]
+dat.use=dat.use[order(as.character(dat.use$DATE)),]
+
+## Steps: break down by year,
+## pmax((TMAX-TMIN)/2,0)
+## cumsum(that thing)
+
+#string manipulation: get year
+year=as.numeric(gsub("-.*","",as.character(dat.use$DATE)))
+
+tbase=10 #developmental zero for our growing degree days
+gdd.day=pmax(0,(dat.use$TMAX+dat.use$TMIN)/2-tbase)
+## empty out gdd
+gdd.july1=NULL
+for(cur.year in 2012:2019){
+  dat.cur=dat.use[year==cur.year,]
+  date.cur=as.character(dat.cur$DATE)
+  mo.day=substr(date.cur,6,10)
+  gdd.cur=cumsum(gdd.day[year==cur.year])
+  gdd.july1=c(gdd.july1, gdd.cur[mo.day=="07-01"])
+}
+
+dat.clim=data.frame(year=2012:2019, gdd.july1)
+```
+
+## Analysis
+
+With our covariate calculated, we could run simple linear regessions between a phenology metric as a dependent variable and our climate covariate. eg:
+
+```{r}
+out=lm(pheno.res$mu ~ dat.clim$gdd.july1)
+summary(out)
+
+plot(dat.clim$gdd.july1,
+     pheno.res$mu,
+     pch=19,
+     xlab="growing degree days on july 1",
+     ylab="mean day of activity"
+     )
+abline(out)
+```
+
+This is the best-fitting line to our data. However, the p values and confidence intervals of this regression aren't telling the whole picture They ignore the fact that we actually know a lot more about our phenology metrics. We have estimates for error, and we should incorporate them into our analysis.
+
+The easiest way to do this is using bootstrapping. We have already generated 10,000 simulated model fits, and so have 10,000 simulated yearly sequences of our phenology metrics. We can fit a linear regression to each of these data sets, and the 0.025 and 0.975 quantiles of the estimated slopes to define the 95% confidence interval for the real slope. We can also calculation the proportion of p values for the slope term that were below 0.05 to give us an analog for a confidence interval of the P value. While we do this for multiple phenology metrics in the main text, here we will demonstrate just with day of peak activity, $\mu$.
+
+
+```{r}
+## first, we want to extract the "sim.mu" row of each data frame within the list `dat.sim`
+# We use a loop to reformat, with a column per year and a row per simulated data set. 
+mumat=NULL
+for(i.year in 1:length(dat.sim)){
+  mumat=cbind(mumat,dat.sim[[i.year]][,"sim.mu"])
+}
+colnames(mumat)=names(dat.sim)
+
+### we'll store results in a matrix w/4 cols: intercept, slope, pint, pslope
+boot.mu=matrix(-99, nrow=nrow(dat.sim[[1]]), ncol=4)
+colnames(boot.mu)=c("int",  "slope", "pint", "pslope")
+
+## loop through and calculate slope for each case
+for(i.row in 1:nrow(boot.mu)){
+  out.cur=lm(mumat[i.row,] ~ dat.clim$gdd.july1)
+  boot.mu[i.row,1:2]=coefficients(out.cur)
+  boot.mu[i.row,3:4]=(summary(out.cur))$coefficients[,4]
+}
+## confidence interval of the slope
+(ci.slope=quantile(boot.mu[,"slope"],c(.025, .975)))
+(ci.p.05=mean(boot.mu[,"pslope"]<0.05))
+(ci.p.1=mean(boot.mu[,"pslope"]<0.1))
+```
+
+Here we can see a consistently negative slope - the 95% CI is all negative. This is in contrast with our simple P value calculated without using out bootstraps (P=0.12), and with our bootstrapped p values (p<0.05  only `r round(ci.p.05*100)`% of the time). We note that these are represeting two distinct ideas: the 95% CI on the slope tells us that ur data, we can be reasonably confident that we would estimate a negative slope with other random samplings of the underlying patterns. The bootstrapping of the p values tells us that even though the slope is consistently negative if we had sampled different data, we typically would not find the slope to be statistically significant.
+
+## Plotting
+
+Like in the section `Plotting fitted curves with bootstrapped errors`, if we want to plot this 95 CI, we need to do so by predicting along a uniform sequence, and plotting the 95% CI at each of those points. We can also add our confidence intervals of mu for each year.
+
+```{r}
+#for bootstrapped intervals
+reso=500
+x.pred=seq(min(dat.clim$gdd.july1), 
+           max(dat.clim$gdd.july1),
+           length=reso)
+murange=range(c(boot.res$mu.16,boot.res$mu.84))
+plot(dat.clim$gdd.july1, pheno.res$mu,
+     xlab="GDD 10 on July 1",
+     ylim=murange,
+     ylab= "day of peak activity",
+     pch=19,cex=1.5, col='cornflowerblue',
+     cex.lab=1.6, cex.axis=1.6)
+segments(x0=dat.clim$gdd.july1,
+         y0=boot.res$mu.16,
+         y1=boot.res$mu.84,
+         col='cornflowerblue')
+out=lm(pheno.res$mu ~ dat.clim$gdd.july1)
+abline(out); 
+## calculate and add bootstrapped intervals
+grid=matrix(-99,
+            ncol=length(x.pred), 
+            nrow=nrow(boot.mu))
+#look through columns (for speed). Probably a vectorizable way of doing this.
+#it's also possible to use the predict() function with the lm() objects, but this seems simpler
+for(i.col in 1:ncol(grid)){
+  grid[,i.col] = boot.mu[,"int"] + x.pred[i.col]*boot.mu[,"slope"]
+}
+CI=apply(grid,2, quantile, probs= pnorm(c(-1,1)))
+# summary(out)
+points(x.pred,
+       CI[1,],
+       type="l",
+       lty=2)
+points(x.pred,
+       CI[2,],
+       type="l",
+       lty=2)
+```
+
+# References

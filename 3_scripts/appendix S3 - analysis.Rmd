@@ -1,0 +1,1538 @@
+---
+title: "Appendix S3, Fitting phenological curves with GLMMs, *Ecology*"
+author: "Collin Edwards and Elizabeth Crone"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+bibliography: appendix-S2.bib
+nocite: | 
+  @lme4, @msm, @MASS, @here, @MuMIn, @tidyverse, @psych, @ggridges, @viridis, @noaa
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Setup
+
+## Document purpose
+
+This implements the analysis and makes figures used in the main text.
+
+This .html file was made from `appendix S3 - analysis.Rmd`, in the `3_scripts` folder of Appendix 4. All necessary files to compile this `.Rmd` file should be in their appropriate folders within Appendix 4. Note that plots are saved to the `5_figs` folder and then imported back to the html, so that they exactly reflect the plots used in the main text. The figure-generation functions `fig_starter` and `gfig_saver` also save figure metadata to the `5_figs` folder. 
+
+## Libraries
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(lme4)
+library(msm)
+library(MASS)
+library(here)
+library(MuMIn)
+library(tidyverse)
+library(psych)
+library(ggridges)
+library(viridis)
+
+set.seed(1234)
+```
+
+
+## Function definitions
+
+
+### Standard Edwards' functions
+
+```{r doy_2md}
+## function for turning DOY to month-day for visualization
+doy_2md=function(i){
+  ymd=as.Date(i-1, origin="2019-01-01")
+  return(format(ymd, "%b %d"))
+}
+## example usage:
+# #generate 30 observations from day of year 40 to 150
+# doy=sample(40:150,30)
+# #generate gaussian counts with noise
+# count=exp(-(doy-100)^2/100)+(runif(30)-.5)*.1
+# plot(doy,count)
+# # now plot with day-month references
+# plot(doy,count, xaxt="n")
+# #Make sequence of days to label. Here, 5 days from day 40 to 150
+# at=round(seq(40,150, length=5))
+# axis(1,at=at, labels=doy_2md(at))
+```
+
+```{r color_gradient}
+## Function for making color gradient in R
+color_gradient <- function(x, colors=viridis(256), colsteps=100) {
+  return( colorRampPalette(colors) (colsteps) [ findInterval(x, seq(min(x),max(x), length.out=colsteps)) ] )
+}
+## Example usage:
+#x=runif(100)
+#plot(x=x, y=1/x, pch=19,col=color_gradient(x),
+#     cex.lab=1.6, main="Example of color gradient")
+
+```
+
+```{r t_col}
+## function for making semi-transparent colors
+t_col <- function(color, alpha = 1, name = NULL) {
+  #	  color = color name
+  #	  alpha = fraction of opacity
+  #	   name = an optional name for the color
+  ## Get RGB values for named color
+  rgb.val <- col2rgb(color)
+  ## Make new color using input color as base and alpha set by transparency
+  t.col <- rgb(rgb.val[1], rgb.val[2], rgb.val[3],
+               max = 255,
+               alpha = alpha*255,
+               names = name)
+  ## Save the color
+  invisible(t.col)
+}
+## example usage:
+# library(plotrix)
+#plot(c(1,2),c(1,2),type='l')
+#red.t = t_col(color="red", alpha=.5)
+#draw.circle(x=1.5, y=1.5, radius=.2, col=red.t)
+```
+
+```{r pair panel functions}
+## Functions for making pair plots
+panel.hist <- function(x, ...){
+  # histogram function
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE, breaks=20)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, col = "cyan", ...)
+}
+panel.cor <- function(x, y,
+                      digits = 2,
+                      prefix = "",
+                      cex.cor,
+                      ...){
+  # function to plot pairwise correlations
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r <- abs(cor(x, y, use="complete.obs"))
+  rsigned=cor(x, y, use="complete.obs")
+  p = cor.test(x, y, use="complate.obs")$p.value
+  txt <- format(c(rsigned, 0.123456789), digits = digits)[1]
+  txt <- paste0(prefix, txt)
+  if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+  col="grey"
+  if(p<.1){col="black"}
+  if(p<.05){col="blue"}
+  text(0.5, 0.5, txt, cex = cex.cor *(r+.2)/(r+1), col=col)
+}
+panel.cortest = function(x,y,
+                         digits=2,
+                         prefix="",
+                         cex.cor,
+                         ...){
+  #function to plot p value of correlations
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  p <- signif(cor.test(x, y, use="complete.obs")$p.value,2)
+  if(missing(cex.cor)) cex.cor <- 2
+  col="grey"
+  if(p<.1){col="black"}
+  if(p<.05){col="blue"}
+  text(.5, .5, p, cex=cex.cor, col=col)
+}
+## example usage:
+# x=runif(100)
+# dat=data.frame(x=x,y=x+.5+rnorm(100)*.1, z=x + rnorm(100))
+# pairs(dat,
+#       lower.panel=panel.cor,
+#       diag.panel=panel.hist)
+# pairs(dat,
+#     lower.panel=panel.cortest,
+#     diag.panel=panel.hist,
+#     upper.panel=panel.cor)
+## Function for taking a vector of strings in R and displaying it as bullets in Rmarkdown
+## Note that the chunk needs to be given the argument of results='asis'
+```
+
+```{r printer}
+printer=function(x){
+  ## x needs to be a vector of strings.
+  com=as.character(x)
+  com=com[com!=""]
+  com=gsub("\n","",com)
+  cat(paste('-', com), sep = '\n') 
+}
+# example usage:
+# ```{r results='asis'}
+#    printer(1:3)
+# ```
+```
+
+```{r fig_starter}
+## Function for making figs with metadata. Note: you will want to change figfold and scriptname default values to be appropriate for this document.
+fig_starter=function(filename, #name of figure file to save as WITHOUT SUFFIX
+                     description, #vector of strings, each will be put in its own line of meta file
+                     ##  Note: generating file is defined in the function, date and time is automatically added.
+                     ##default figure info:
+                     width=12,
+                     height=8,
+                     units="in",
+                     res=600,
+                     figfold="5_figs",
+                     scriptname="appendix s3 - analysis.Rmd"
+){
+  #function to automate making a jpeg figure (can change code here to make png)
+  #and also add meta text
+  #NOTE: still have to use dev.off() at the end of plot-making
+  
+  ## save meta file
+  cat(c(description,
+        "",##easy way to add an extra line to separate description for basic data.
+        paste("from",scriptname),
+        as.character(Sys.time())),
+      sep="\n",
+      file=here(figfold, paste(filename,"_meta.txt", sep=""))
+  )
+  
+  ## open jpeg device
+  jpeg(file=here(figfold,paste(filename,".jpg", sep="")),
+       width=width, 
+       height=height, 
+       units=units, 
+       res=res)
+}
+## Example usage:
+# fig_starter(filename="testfig", description=c("This figure was made as an example.","We can add endless lines of description."))
+# plot(1:10,1:10, pch=1:10)
+# dev.off()
+## Note: in this case the example will not work for you unless you give it the correct location for "figfold" - the relative file path to the folder for your figures.
+```
+
+```{r gfig_saver}
+# function for saving ggplot figures and metadata. As fig_starter (which is for base graphics), except that saving ggfigures is inherently cleaner, as you are not feeding commands to an open graphics device
+
+gfig_saver=function(gfig, #object to be saved
+                    filename, #name of figure file to save as WITHOUT SUFFIX
+                    description, #vector of strings, each will be put in its own line of meta file
+                    ##  Note: generating file is defined in the function, date and time is automatically added.
+                    ##default figure info:
+                    width=12,
+                    height=8,
+                    units="in",
+                    figfold="5_figs",
+                    scriptname="appendix s3 - analysis.Rmd"
+){
+  ## save meta file
+  cat(c(description,
+        "",##easy way to add an extra line to separate description for basic data.
+        paste("from",scriptname),
+        as.character(Sys.time())),
+      sep="\n",
+      file=here(figfold, paste(filename,"_meta.txt", sep=""))
+  )
+  ggsave(filename=here(figfold, paste(filename,".jpg", sep="")),
+         plot=gfig,
+         device="jpeg",
+         dpi=600,
+         width=width, height=height, units=units
+  )
+}
+```
+
+### Project-specific functions
+
+```{r coefs_unscaled}
+## Function for reversing scaling of coefficient estimates
+coefs_unscaled = function(fixefs, mean, sd){
+  #fixefs: the 3 coefficients of the regression fitted to scaled predictor
+  #  in either matrix/data frame form or vector form
+  #mean: mean of original unscaled predictor
+  #sd: sd of original unscaled predictor
+  ## the equations below can be obtained by doing the algebra
+  ## based on the transformation of scaling
+  
+  #if a vector, turn into a 1-row matrix
+  if(is.null(nrow(fixefs))){
+    fixefs=matrix(fixefs, nrow=1) 
+  }
+  fixefs[,1] <- fixefs[,1] - fixefs[,2] * mean / sd + fixefs[,3] * mean^2 / sd^2
+  fixefs[,2] <- fixefs[,2] / sd - 2 * fixefs[,3] * mean / sd^2
+  fixefs[,3] <- fixefs[,3] / sd^2
+  colnames(fixefs)=c("beta0", "beta1", "beta2")
+  return(fixefs)
+}
+```
+
+# Data wrangling and analysis
+
+## Data reading
+
+Here we add in a scaled day of year (DOY) variable, DOYsc. 
+```{r}
+BCB = read.csv(here("1_raw_data","BCBcounts v2.csv"))
+# head(BCB)
+BCB$uqID = rownames(BCB) # possible identifier for overdispersed poisson
+BCB$DOYsc=scale(BCB$DOY, scale=T)
+## For unscaling, we will need to use mean() and sd() of $DOY. We do this as needed below.
+```
+
+Read in the capture-mark-recapture estimates
+
+
+```{r}
+markrecap=read.csv(here("1_raw_data","pop.trends.csv"))
+names(markrecap)=c("year","sex","n","se","lowci","uppci","total","dnorm","lowcidorm","uppcidorm")
+realsize=markrecap[markrecap$sex=="Both",c("year","total","lowcidorm","uppcidorm")]
+#
+
+```
+
+
+## Exploring models
+
+Here we compare models with and without overdispersion using an individual-level random effect, using scaled day of year as our predictor, and including random effects to allow the gaussian curves to vary by year.
+
+```{r}
+## Correct model:
+
+## scaled model, no individual RE
+m0 = glmer(count ~ DOYsc + I(DOYsc*DOYsc) + (DOYsc + I(DOYsc*DOYsc)|year), family = poisson, data = BCB)
+summary(m0)
+
+## scaled model, individual RE
+mID = glmer(count ~ DOYsc + I(DOYsc*DOYsc) + (DOYsc + I(DOYsc*DOYsc)|year) + (1|uqID), family = poisson, data = BCB)
+summary(mID)
+
+AIC(m0, mID)
+
+```
+
+
+Looking at AIC, we see that including an individual-level effect dramatically improves model fit.
+
+
+# Math and figure-making
+
+## Just the points
+
+First we plot just the data. This is not reported in the main text, but we used as a heuristic to make sure the data appeared to be largely Gaussian in shape.
+
+```{r message=FALSE}
+fig_starter(filename="justpoints",
+            description="Figure of just the points.")
+par(mfrow=c(2,4))
+use.xlim=c(170,210)#range of x to plot
+for(year.cur in 2012:2019){
+  usedat = BCB[BCB$year == year.cur,]
+  plot(usedat$DOY, usedat$count, pch=1, main=year.cur, xaxt='n',
+       xlim=use.xlim, 
+       ylim=c(0,max(usedat$count)*1.1),
+       xlab="",
+       ylab="Observed counts",
+       cex.axis=1.5, 
+       cex.lab=1.5)
+  xtick=round(seq(use.xlim[1], use.xlim[2], length=5))
+  axis(side=1,at=xtick, label=doy_2md(xtick), cex.axis=1.5)
+}
+dev.off()
+```
+![](../5_figs/justpoints.jpg)
+
+
+## plotting model fits
+
+Now that we're confident Gaussian curves *should* be able to approximate the data, we overlay our model fits on the data points to make sure they. This is not presented in the main text, but is an intermediate step towards figure 1. 
+
+```{r message=FALSE}
+fig_starter(filename="yearlyfits",
+            description="Figure of model fits for each year.")
+par(mfrow=c(2,4))
+use.xlim=c(170,210)#range of x to plot
+x.pred=seq(use.xlim[1],use.xlim[2], by=.01)
+mod.fits=data.frame(doy=x.pred)
+for(year.cur in 2012:2019){
+  usedat = BCB[BCB$year == year.cur,]
+  plot(usedat$DOY, usedat$count, pch=1, main=year.cur, xaxt='n',
+       xlim=use.xlim, 
+       ylim=c(0,max(usedat$count)*1.1),
+       xlab="",
+       ylab="Observed counts",
+       cex.axis=1.5, 
+       cex.lab=1.5)
+  xtick=round(seq(use.xlim[1], use.xlim[2], length=5))
+  axis(side=1,at=xtick, label=doy_2md(xtick), cex.axis=1.5)
+  ## Add predicted points for the scaled model (unscale first)
+  # calculate predictions for the average of that year
+  
+  coef.cur=coefficients(mID)$year
+  coef.cur=coef.cur[rownames(coef.cur)==year.cur,]
+  coef.cur=coefs_unscaled(coef.cur, mean(BCB$DOY), sd(BCB$DOY))
+  y.pred=exp(coef.cur[[1]] + coef.cur[[2]]*x.pred + coef.cur[[3]]*x.pred^2)
+  mod.fits=cbind(mod.fits, y.pred)
+  points(x.pred, y.pred, type='l', col='blue')
+  # #add predicted poitns for the unscaled model
+  # coef.cur=coefficients(m1)$year
+  # coef.cur=coef.cur[rownames(coef.cur)==year.cur,]
+  # y.pred=exp(coef.cur[[1]] + coef.cur[[2]]*x.pred + coef.cur[[3]]*x.pred^2)
+  # points(x.pred, y.pred, type='l', col='indianred')
+  # legend("topright",legend=c("scaled","unscaled"),fill=c("blue","indianred"))
+}
+dev.off()
+colnames(mod.fits)[-1]=as.character(2012:2019)
+
+```
+
+![](../5_figs/yearlyfits.jpg)
+
+we can see that our Guassian shapes appear to be capturing the dynamics of the data.
+
+
+
+## Make generic gaussian shape for making conceptual diagram
+
+We use this for Appendix S1: Fig. S1.
+
+```{r message=FALSE}
+
+fig_starter(filename="Example gaussian",
+            description=c("Basic gaussian shape for constructing a diagram."),
+            width=12)
+
+usedat = BCB[BCB$year == year.cur,]
+x.pred=seq(min(usedat$DOYsc)*3,max(usedat$DOYsc)*3, by=.002)
+coef.cur=coefficients(mID)$year
+coef.cur=coef.cur[rownames(coef.cur)==year.cur,]
+y.pred=exp(coef.cur[[1]] + coef.cur[[2]]*x.pred + coef.cur[[3]]*x.pred^2)
+y.pred[c(1,length(y.pred))]=0
+plot(x.pred,y.pred, type='l')
+polygon(x.pred, y.pred, col='darkslategray1')
+points(x.pred,y.pred, type='l', lwd=2)
+dev.off()
+```
+
+
+![](../5_figs/Example gaussian.jpg)
+
+## Calculating pheno metrics in a variety of ways
+
+First, we must address how to find the variance covariance matrix for the yearly estimates that incorporate both fixed and random effects. If we're willing to assume independence of the conditional variance and the fixed-effect sampling variance, then (e.g.) the variance of the intercepts for each group would be the sum of the fixed-effect intercept variance and the conditional variance of the intercept for each group. See <https://bbolker.github.io/mixedmodels-misc/glmmFAQ.html#confidence-intervals-on-conditional-meansblupsrandom-effects>.
+
+So, to get the variance-covariance estimates for delta-method back-transformation from mixed models, we use
+
+```{r}
+# cv = ranef(m0, condVar = T)
+# attr(cv$year, "postVar") # variance covariance matrix for random effects, conditioned on fixed effects
+# vcov(m0) + attr(cv$year, "postVar")[,,1] #2012
+# vcov(m0) + attr(cv$year, "postVar")[,,2] #2013
+# vcov(m0) + attr(cv$year, "postVar")[,,5] #2105 - best sampled
+# vcov(m0) + attr(cv$year, "postVar")[,,8] #2019 - most sparse
+# # etc
+```
+
+
+Now we calculate our four phenological metrics (day of peak/mean activity, sd of activity, abundance index, peak activity). Here we calculate using the delta method and parametric bootstrapping.
+
+We also save the coefficients and their error estimates for later comparisons. Note that for this, the coefficients of the scaled model have been unscaled using the delta method to make it easy to compare.
+
+```{r calculating metrics for each year}
+
+
+#############################
+## building up delta method:
+## msm::deltamethod can handle a list of transformations, and by default returns the cov mat of that function.
+## Note: trying both with unscaled model (m1) and scaled model (m0).
+## Unscaled model requires only 1 level of deltamethod, but had model fit issues.
+## scaled model requires deltamethod for unscaling, then again for extracting phenotypic metrics
+nsample = 10000 #number of samples for bootstrapping
+res=NULL
+cv = ranef(mID, condVar = TRUE)
+dat.sim=list()
+for(i in 1:nrow(coef(mID)$year)){
+  cur.mean=coef(mID)$year[i,] #scaled means
+  ## first unscale coefficients:
+  cur.est=coefs_unscaled(cur.mean, mean(BCB$DOY), sd(BCB$DOY))
+  ## get estimate from unscaled model
+  form1=sprintf("~ x1 - x2 * %f / %f + x3 * %f^2 / %f ^2",
+                mean(BCB$DOY),
+                sd(BCB$DOY),
+                mean(BCB$DOY),
+                sd(BCB$DOY)
+  )
+  form2=sprintf("~ x2/%f - 2 * x3 * %f / %f ^2",
+                sd(BCB$DOY),
+                mean(BCB$DOY),
+                sd(BCB$DOY)
+  )
+  form3=sprintf("~ x3 / %f ^2",
+                sd(BCB$DOY)
+  )
+  
+  names(cur.mean)=c("x1","x2","x3")
+  
+  cur.cov=deltamethod(list(as.formula(form1),
+                           as.formula(form2),
+                           as.formula(form3)),
+                      mean=cur.mean,
+                      cov=vcov(mID) + attr(cv$year, "postVar")[,,i],
+                      ses=F
+  )
+  cur.ses=deltamethod(list(as.formula(form1),
+                           as.formula(form2),
+                           as.formula(form3)),
+                      mean=cur.mean,
+                      cov=vcov(mID) + attr(cv$year, "postVar")[,,i],
+                      ses=T
+  )
+  #calculate mu metrics
+  cur.mu=cur.est[2]/(-2*cur.est[3])
+  cur.muses=deltamethod(~ x2/(-2 * x3),
+                        mean=as.numeric(cur.est),
+                        cov=cur.cov
+  )
+  cur.sd=sqrt(1/(- 2 *cur.est[3]))
+  cur.sdses=deltamethod(~ sqrt(1 / (-2* x3)),
+                        mean=as.numeric(cur.est),
+                        cov=cur.cov)
+  
+  # calc N metrics
+  cur.N=sqrt(2*pi/(-2*cur.est[3]))*exp(cur.est[1]+(cur.est[2]^2)/(-4*cur.est[3]))
+  cur.Nses=deltamethod(~sqrt(2*pi/(-2*x3))*exp(x1+(x2^2)/(-4*x3)),
+                       mean=as.numeric(cur.est),
+                       cov=cur.cov)
+  # calculate peak bundance metrics
+  cur.h=exp(cur.est[1] + cur.est[2]*cur.mu + cur.est[3]*cur.mu^2)
+  cur.hses=deltamethod(~exp(x1 + x2*x2/(-2 * x3) + x3 * (x2/(-2 * x3))^2),
+                       mean=as.numeric(cur.est),
+                       cov=cur.cov)
+  ## parametric bootstrapping
+  #make simulted data
+  sim=mvrnorm(n = nsample, mu = as.numeric(coef(mID)$year[i,]),
+              Sigma = as.matrix(vcov(mID) +
+                                  attr(ranef(mID, condVar = T)$year, "postVar")[,,i])
+  )
+  #now can unscale this
+  sim.unsc=sim*0
+  for(i.row in 1:nrow(sim)){
+    sim.unsc[i.row,]=coefs_unscaled(sim[i.row,], mean=mean(BCB$DOY), sd=sd(BCB$DOY))
+  }
+  #now can apply cool maths
+  sim.mu=sim.unsc[,2]/(-2*sim.unsc[,3])
+  sim.sd=sqrt(1/(- 2 *sim.unsc[,3]))
+  sim.N=sqrt(2*pi/(-2*sim.unsc[,3]))*exp(sim.unsc[,1]+(sim.unsc[,2]^2)/(-4*sim.unsc[,3]))
+  sim.h=exp(sim.unsc[,1] + sim.unsc[,2]*sim.mu + sim.unsc[,3]*sim.mu^2)
+  ## Saving results
+  dat.temp=cbind(sim, sim.unsc,sim.mu, sim.sd, sim.N,sim.h)
+  colnames(dat.temp)[1:6]=c("b0", "b1", "b2", "b0unsc", "b1unsc", "b2unsc")
+  dat.sim[[i]]=dat.temp
+  
+  res=rbind(res,
+            data.frame(year=as.numeric(rownames(coef(mID)$year)[i]),
+                       mu=as.numeric(cur.mu),
+                       mu.ses=as.numeric(cur.muses),
+                       sd=as.numeric(cur.sd),
+                       sd.ses=as.numeric(cur.sdses),
+                       N=as.numeric(cur.N),
+                       N.ses=as.numeric(cur.Nses),
+                       h=as.numeric(cur.h),
+                       h.ses=as.numeric(cur.hses),
+                       b0=cur.est[[1]],
+                       b0.ses=cur.ses[[1]],
+                       b1=cur.est[[2]],
+                       b1.ses=cur.ses[[2]],
+                       b2=cur.est[[3]],
+                       b2.ses=cur.ses[[3]],
+                       mu.boot=mean(sim.mu),
+                       mu.bootses=sd(sim.mu),
+                       mu.boot025=quantile(sim.mu,.025)[[1]],
+                       mu.boot975=quantile(sim.mu,.975)[[1]],
+                       mu.boot16=quantile(sim.mu,pnorm(-1))[[1]],
+                       mu.boot84=quantile(sim.mu,pnorm(1))[[1]],
+                       sd.boot=mean(sim.sd),
+                       sd.bootses=sd(sim.sd),
+                       sd.boot025=quantile(sim.sd,.025)[[1]],
+                       sd.boot975=quantile(sim.sd,.975)[[1]],
+                       sd.boot16=quantile(sim.sd,pnorm(-1))[[1]],
+                       sd.boot84=quantile(sim.sd,pnorm(1))[[1]],
+                       N.boot=mean(sim.N),
+                       N.bootses=sd(sim.N),
+                       N.boot025=quantile(sim.N,.025)[[1]],
+                       N.boot975=quantile(sim.N,.975)[[1]],
+                       N.boot16=quantile(sim.N,pnorm(-1))[[1]],
+                       N.boot84=quantile(sim.N,pnorm(1))[[1]],
+                       h.boot=mean(sim.h),
+                       h.bootses=sd(sim.h),
+                       h.boot025=quantile(sim.h,.025)[[1]],
+                       h.boot975=quantile(sim.h,.975)[[1]],
+                       h.boot16=quantile(sim.h,pnorm(-1))[[1]],
+                       h.boot84=quantile(sim.h,pnorm(1))[[1]]
+            )
+  )
+}
+```
+
+## Plotting bootstrapped estimates
+
+Now we can plot our data and moel fits with bootstrapped standard errors (used in Figure 1).
+
+```{r bootstrapped CI of years, message=FALSE}
+fig_starter(filename="yearlyBootstraps-CI",
+            description="Data points, and +/- 1 sd equivalent bars calculated using parametric bootstrapping on a grid of values, pnorm(c(-1,1)). This shows model fit with overdispersion.")
+par(mfrow=c(2,4), mar=c(4,6,4,2))
+use.xlim=c(170,210)#range of x to plot
+i.count=1
+for(year.cur in 2012:2019){
+  i.year=year.cur-2011 #janky, but gives us indexing
+  usedat = BCB[BCB$year == year.cur,]
+  ## Add predicted points for the scaled model (unscale first)
+  # calculate predictions for the average of that year
+  x.pred=seq(use.xlim[1],use.xlim[2], by=.1)
+  #make grid to fill with estimates - each row is one sim, each col is a grid point
+  grid=matrix(-99,
+              ncol=length(x.pred), 
+              nrow=nrow(dat.sim[[i.year]]))
+  #look through columns (for speed). Probably a vectorizable way of doing this.
+  for(i.col in 1:ncol(grid)){
+    grid[,i.col] = exp(dat.sim[[i.year]][,"b0unsc"] + 
+                         dat.sim[[i.year]][,"b1unsc"]*x.pred[i.col] +
+                         dat.sim[[i.year]][,"b2unsc"]*x.pred[i.col]^2)
+  }
+  CI=apply(grid,2, quantile, probs= pnorm(c(-1,1)))
+  #draw fitted line
+  coef.cur=coefficients(mID)$year
+  coef.cur=coef.cur[rownames(coef.cur)==year.cur,]
+  coef.cur=coefs_unscaled(coef.cur, mean(BCB$DOY), sd(BCB$DOY))
+  y.pred=exp(coef.cur[[1]] + coef.cur[[2]]*x.pred + coef.cur[[3]]*x.pred^2)
+  
+  ## Do the plotting
+  plot(x.pred, CI[2,], pch=1,
+       # main=year.cur, 
+       xaxt='n',
+       type='n',
+       xlim=use.xlim,
+       xlab="",
+       ylab="Observed counts",
+       cex.axis=2, cex.lab=2.2)
+  xtick=round(seq(use.xlim[1], use.xlim[2], length=5))
+  axis(side=1,at=xtick, label=doy_2md(xtick), cex.axis=2)
+  title(paste(LETTERS[i.count],".  ", year.cur, sep=""),
+        adj = 0, line=0.4, cex.main=2.2)
+  points(x.pred, y.pred, type='l', col='blue')
+  points(x.pred, CI[1,], type='l', lty=2, col="darkgray")
+  points(x.pred, CI[2,], type='l', lty=2, col="darkgray")
+  points(usedat$DOY, usedat$count, pch=19)
+  #add predicted points for the unscaled model
+  i.count=i.count+1
+}
+dev.off()
+```
+
+![](../5_figs/yearlyBootstraps-CI.jpg)
+
+## Plotting Phenology metrics
+
+Here we plot the estimates and 95% CI for the model estimates using delta method and parametric bootstrapping. Used in Figure 1.
+
+```{r plotting pheno metrics, message=FALSE}
+fig_starter(filename="pheno-metrics",
+            description=c("Comparing estimates and +/- 1sd or equivalent obtained using the delta method or parametric bootstrapping",
+                          "Flight period is the number of days between the 10th and 90th quantiles"),
+            height = 4)
+par(mfrow=c(1,3))
+## flight period
+fp.mult=2*qnorm(.9) #for turning sd into 10% - 90% quantiles
+plot(res$year,
+     res$sd*fp.mult,
+     # main="flight period",
+     pch=19,
+     # ylim=c(min(res$sd-res$sd.ses*1.96)*fp.mult,
+     # max(res$sd+res$sd.ses*1.96))*fp.mult,
+     ylim=c(0,max(res$sd+res$sd.ses)*fp.mult),
+     xlab="year",
+     ylab="Flight period", 
+     cex.axis=1.6,
+     cex.lab=1.6)
+title("I.", adj = 0, line=0.4, cex.main=1.8)
+legend("bottomleft",
+       legend=c("delta method","bootstrap"),
+       fill=c("black","cornflowerblue"), cex=1.8)
+points(res$year+.1,
+       res$sd*fp.mult,
+       col='cornflowerblue',
+       pch=19)
+segments(x0=res$year,
+         y0=res$sd*fp.mult+res$sd.ses*fp.mult,
+         y1=fp.mult*(res$sd-res$sd.ses))
+segments(x0=res$year+.1,
+         y0=res$sd.boot16*fp.mult,
+         y1=res$sd.boot84*fp.mult,
+         col='cornflowerblue')
+
+## Day of peak activity
+plot(res$year,
+     res$mu,
+     pch=19,
+     ylim=c(min(res$mu-res$mu.ses),
+            max(res$mu+res$mu.ses)),
+     cex.axis=1.6,
+     cex.lab=1.6,
+     xlab="year",
+     ylab="Day of peak activity")
+title("J.", adj = 0, line=0.4, cex.main=1.8)
+points(res$year+.1,
+       res$mu,
+       pch=19,
+       col='cornflowerblue')
+
+segments(x0=res$year,
+         y0=res$mu+res$mu.ses,
+         y1=res$mu-res$mu.ses)
+segments(x0=res$year+.1,
+         y0=res$mu.boot16,
+         y1=res$mu.boot84,
+         col='cornflowerblue')
+
+## Abundance index
+plot(res$year,
+     res$N,
+     # main="Abundance index",
+     pch=19,
+     ylim=c(min(res$N-res$N.ses),
+            max(res$N.boot84)),
+     xlab="year",
+     cex.axis=1.6,
+     cex.lab=1.6,
+     ylab="Abundance index")
+title("K.", adj = 0, line=0.4, cex.main=1.8)
+points(res$year+.1,
+       res$N,
+       pch=19,
+       col='cornflowerblue')
+
+segments(x0=res$year,
+         y0=res$N+res$N.ses,
+         y1=res$N-res$N.ses)
+segments(x0=res$year+.1,
+         y0=res$N.boot16,
+         y1=res$N.boot84,
+         col='cornflowerblue')
+
+dev.off()
+
+```
+
+![](../5_figs/pheno-metrics.jpg)
+
+
+## Combining for Figure 1
+
+Here we do some fiddly formatting with screen.grid and xpd=NA to shape Figure 1 exactly how we want.
+
+```{r message=FALSE}
+
+fig_starter(filename="fig1-combined",
+            description="Combined using split.screen.",
+            width=12, height = 10)
+
+#create the shape of figure 1 - two rows of 4 subplots, then 1 row of 3 subplots
+screen.grid = rbind(c(0, .25, 1-1/3, 1),
+                    c(.25, .5, 1-1/3, 1),
+                    c(.5, .75, 1-1/3, 1),
+                    c(.75, 1, 1-1/3, 1), #end row 1
+                    c(0, .25, 1-2/3, 1-1/3),
+                    c(.25, .5, 1-2/3, 1-1/3),
+                    c(.5, .75, 1-2/3, 1-1/3),
+                    c(.75, 1, 1-2/3, 1-1/3), # end row 2
+                    c(0, 1/3, 0, 1-2/3),
+                    c(1/3, 2/3, 0, 1-2/3),
+                    c(2/3, 1, 0, 1-2/3) # end row 3
+)
+#Rescale our screen grid to create a buffer on the left 
+#   to leave room for Y axis on subplots A, E.
+buffer=.05 
+screen.grid[,1:2]=screen.grid[,1:2]+buffer
+screen.grid[,1:2]=screen.grid[,1:2]/max(screen.grid[,1:2])
+
+split.screen(screen.grid)
+i.screen = 1
+
+
+split.screen(screen.grid)
+i.screen = 1
+
+
+use.xlim=c(170,210)#range of x to plot
+i.count=1
+for(year.cur in 2012:2019){
+  i.year=year.cur-2011 #janky, but gives us indexing
+  usedat = BCB[BCB$year == year.cur,]
+  ## Add predicted points for the scaled model (unscale first)
+  # calculate predictions for the average of that year
+  x.pred=seq(use.xlim[1],use.xlim[2], by=.1)
+  #make grid to fill with estimates - each row is one sim, each col is a grid point
+  grid=matrix(-99,
+              ncol=length(x.pred), 
+              nrow=nrow(dat.sim[[i.year]]))
+  #look through columns (for speed). Probably a vectorizable way of doing this.
+  for(i.col in 1:ncol(grid)){
+    grid[,i.col] = exp(dat.sim[[i.year]][,"b0unsc"] + 
+                         dat.sim[[i.year]][,"b1unsc"]*x.pred[i.col] +
+                         dat.sim[[i.year]][,"b2unsc"]*x.pred[i.col]^2)
+  }
+  CI=apply(grid,2, quantile, probs= pnorm(c(-1,1)))
+  #draw fitted line
+  coef.cur=coefficients(mID)$year
+  coef.cur=coef.cur[rownames(coef.cur)==year.cur,]
+  coef.cur=coefs_unscaled(coef.cur, mean(BCB$DOY), sd(BCB$DOY))
+  y.pred=exp(coef.cur[[1]] + coef.cur[[2]]*x.pred + coef.cur[[3]]*x.pred^2)
+  
+  ## Do the plotting
+  screen(i.screen); i.screen=i.screen+1
+  par(mar=c(3,3,3,2))
+  # add y label only on subplots A, E
+  ylab=""; if(i.count %in% c(1,5)){ylab="Observed counts"} 
+  # print(ylab)
+  if(i.count==5){ #for E, custom y axis to handle spacing
+    plot(x.pred, CI[2,], pch=1,
+         # main=year.cur, 
+         xaxt='n',
+         yaxt='n',
+         type='n',
+         xlim=use.xlim,
+         xlab="",
+         ylab=ylab,
+         # ylab="Observed counts",
+         cex.axis=1.6, cex.lab=1.8,
+         xpd=NA
+    )
+    axis(2, at=(0:3)*50, labels=(0:3)*50, cex.axis=1.6, gap.axis = 0)
+  }else if(i.count == c(6)) { #for G, custom y axis to handle spacing.
+    plot(x.pred, CI[2,], pch=1,
+         # main=year.cur, 
+         xaxt='n',
+         yaxt='n',
+         type='n',
+         xlim=use.xlim,
+         xlab="",
+         ylab=ylab,
+         # ylab="Observed counts",
+         cex.axis=1.6, cex.lab=1.8,
+         xpd=NA
+    )
+    axis(2, at=(0:5)*10, labels=c(0,"","20","","40",""), cex.axis=1.6, gap.axis = 0)
+  }else if(i.count == c(7)) { #for G, custom y axis to handle spacing.
+    plot(x.pred, CI[2,], pch=1,
+         # main=year.cur, 
+         xaxt='n',
+         yaxt='n',
+         type='n',
+         xlim=use.xlim,
+         xlab="",
+         ylim=c(0,45),
+         ylab=ylab,
+         # ylab="Observed counts",
+         cex.axis=1.6, cex.lab=1.8,
+         xpd=NA
+    )
+    axis(2, at=(0:5)*10, labels=c(0,"","20","","40",""), cex.axis=1.6, gap.axis = 0)
+  }else{
+    plot(x.pred, CI[2,], pch=1,
+         # main=year.cur, 
+         xaxt='n',
+         type='n',
+         xlim=use.xlim,
+         xlab="",
+         ylab=ylab,
+         # ylab="Observed counts",
+         cex.axis=1.6, cex.lab=1.8,
+         xpd=NA
+    )
+  }
+  xtick=round(seq(use.xlim[1], use.xlim[2], length=3))
+  axis(side=1,at=xtick, label=doy_2md(xtick), cex.axis=1.6)
+  title(paste(LETTERS[i.count],".  ", year.cur, sep=""),
+        adj = 0, line=0.4, cex.main=1.6)
+  points(x.pred, y.pred, type='l', col='blue')
+  points(x.pred, CI[1,], type='l', lty=2, col="darkgray")
+  points(x.pred, CI[2,], type='l', lty=2, col="darkgray")
+  points(usedat$DOY, usedat$count, pch=19)
+  #add predicted points for the unscaled model
+  i.count=i.count+1
+}
+
+## pheno metrics
+## Flight period
+screen(i.screen); i.screen = i.screen + 1
+fp.mult=2*qnorm(.9) #for turning sd into 10% - 90% quantiles
+par_fig2metrics=function(){par(mar=c(3,4,3,2))}
+# par_fig2metrics()
+par(mar=c(3,3,3,2))
+plot(res$year,
+     res$sd*fp.mult,
+     # main="flight period",
+     pch=19,
+     # ylim=c(min(res$sd-res$sd.ses*1.96)*fp.mult,
+     # max(res$sd+res$sd.ses*1.96))*fp.mult,
+     ylim=c(0,max(res$sd+res$sd.ses)*fp.mult),
+     xlab="year",
+     ylab="Flight period (days)", 
+     cex.axis=1.6,
+     cex.lab=1.8,
+     yaxt='n',
+     xpd=NA)
+axis(2, at = (0:4)*5, labels = c("0","","10","","20"), cex.axis=1.6, gap.axis=0)
+title("I.", adj = 0, line=0.4, cex.main=1.6)
+legend("bottomleft",
+       legend=c("delta method","bootstrap"),
+       fill=c("black","cornflowerblue"), cex=1.3, 
+       bty='n')
+points(res$year+.1,
+       res$sd*fp.mult,
+       col='cornflowerblue',
+       pch=19)
+segments(x0=res$year,
+         y0=res$sd*fp.mult+res$sd.ses*fp.mult,
+         y1=fp.mult*(res$sd-res$sd.ses))
+segments(x0=res$year+.1,
+         y0=res$sd.boot16*fp.mult,
+         y1=res$sd.boot84*fp.mult,
+         col='cornflowerblue')
+
+## Day of peak activity
+screen(i.screen); i.screen = i.screen + 1
+par_fig2metrics()
+plot(res$year,
+     res$mu,
+     pch=19,
+     ylim=c(min(res$mu-res$mu.ses),
+            max(res$mu+res$mu.ses)),
+     yaxt='n',
+     cex.axis=1.6,
+     cex.lab=1.6,
+     xlab="year",
+     ylab="Day of peak activity",
+     xpd=NA)
+axis(2, at=c(186, 189, 192), labels=doy_2md(c(186, 189, 192)), cex.axis=1.6)
+title("J.", adj = 0, line=0.4, cex.main=1.6)
+points(res$year+.1,
+       res$mu,
+       pch=19,
+       col='cornflowerblue')
+
+segments(x0=res$year,
+         y0=res$mu+res$mu.ses,
+         y1=res$mu-res$mu.ses)
+segments(x0=res$year+.1,
+         y0=res$mu.boot16,
+         y1=res$mu.boot84,
+         col='cornflowerblue')
+
+## Abundance index
+screen(i.screen); i.screen = i.screen + 1
+par_fig2metrics()
+plot(res$year,
+     res$N,
+     # main="Abundance index",
+     pch=19,
+     ylim=c(min(res$N-res$N.ses),
+            max(res$N.boot84)),
+     # xlab="year",
+     xlab="",
+     cex.axis=1.6,
+     cex.lab=1.6,
+     yaxt="n",
+     ylab="Abundance index", 
+     xpd=NA)
+axis(2, 
+     at = c(0,1250, 2500, 3759, 5000), 
+     labels=c("0","", "2500", "", "5000"),
+     cex.axis=1.6,
+     gap.axis=0
+)
+title("K.", adj = 0, line=0.4, cex.main=1.6)
+points(res$year+.1,
+       res$N,
+       pch=19,
+       col='cornflowerblue')
+
+segments(x0=res$year,
+         y0=res$N+res$N.ses,
+         y1=res$N-res$N.ses)
+segments(x0=res$year+.1,
+         y0=res$N.boot16,
+         y1=res$N.boot84,
+         col='cornflowerblue')
+
+close.screen(all.screens = TRUE)
+dev.off()
+
+```
+
+
+## Looking at first/last observations
+
+Obtain the 0.1, 0.9 quantiles as well as the day of first and last non-zero observation for each year.
+
+```{r calc first/last}
+
+fl=BCB %>% 
+  group_by(year) %>%
+  summarise(fst=min(DOY),
+            last=max(DOY))
+fl=cbind(fl,
+         q.1=qnorm(.1,
+                   mean=res$mu, 
+                   sd=res$mu.ses),
+         q.9=qnorm(.9,
+                   mean=res$mu, 
+                   sd=res$mu.ses),
+         N=res$N)
+
+```
+
+
+Plot these metrics for Figure 3.
+
+```{r message=FALSE}
+fig_starter(filename="firstlast",
+            description=c("Comparison of first obs vs 10%, last obs vs 90% quantile.",
+                          "Circle size is square reoot scale of capture-recapture population estimates."),
+            height=16, width=8)
+myblue=t_col(color="cornflowerblue", alpha=.7)
+par(mfrow=c(2,1))
+
+## Early observations:
+plot(fl$q.1, fl$fst, cex=1+sqrt(realsize$total)/10, pch=19,
+     xlim=c(175, 195),
+     ylim=c(165, 185),
+     col=myblue,
+     xlab="DOY of 0.1 quantile",
+     ylab="DOY of first obs",
+     cex.lab=1.6,
+     cex.axis=1.6,
+     cex.main=1.5)
+title("B.", adj = 0, line=0.4, cex.main=1.8)
+points(fl$q.1, fl$fst, pch=21, cex=1+sqrt(realsize$total)/10)
+
+mn.x=mean(fl$q.1)
+mn.y=mean(fl$fst)
+abline(a=mn.y-mn.x, b=1, lwd=2)
+## Late observations
+plot(fl$q.9, fl$last, cex=1+sqrt(realsize$total)/10, pch=19,
+     xlim=c(180, 210),
+     ylim=c(190,220),
+     col=myblue,
+     xlab="DOY of 0.9 quantile",
+     ylab="DOY of last obs",
+     cex.lab=1.6,
+     cex.axis=1.6,
+     # main="Late obs",
+     cex.main=1.5)
+title("C.", adj = 0, line=0.4, cex.main=1.8)
+points(fl$q.9, fl$last, pch=21, cex=1+sqrt(realsize$total)/10)
+mn.x=mean(fl$q.9)
+mn.y=mean(fl$last)
+abline(a=mn.y-mn.x, b=1, lwd=2)
+
+dev.off()
+```
+
+![](../5_figs/firstlast.jpg)
+
+## N vs N (mark recap)
+
+Here we plot gaussian estimated abundance against capture-mark-recapture abundance estimates.
+
+To calculate +/- 1 sd of the mark recapture estimates, we approximately halved the difference between estimate and 95% CI (multiply by `1/qnorm(.975)`)
+
+```{r message=FALSE}
+fig_starter(file="N-vs-N",description = "comparing mark recapture and gaussian estimates", width=8, height=8)
+# par(mfrow=c(1,2))
+# par(c(5, 5, 4, 2) + 0.1)
+plot(realsize$total, res$N, pch=19,
+     xlab="mark recapture estimate",
+     ylab="abundance index",
+     col='cornflowerblue', cex=1.8,
+     cex.lab=1.6, cex.axis=1.6)
+title("A.", adj = 0, line=0.4, cex.main=1.8)
+segments(x0=realsize$total, 
+         y0=res$N.boot16,
+         y1=res$N.boot84)
+segments(y0=res$N,
+         x0=realsize$total+
+           (realsize$lowcidorm-realsize$total)/qnorm(.975), 
+         x1=realsize$total+
+           (realsize$uppcidorm-realsize$total)/qnorm(.975))
+ellipses(x=realsize$total, y = fl$N, add=TRUE, smooth = F, n = 1, col = "gray60", pch = 21, cex = 1.25, bg = "slateblue", xlab = "", ylab = "", lwd = 2, lty = "dotted", data=F)
+
+dev.off()
+summary(lm(realsize$total ~ res$N))
+```
+
+![](../5_figs/N-vs-N.jpg)
+
+We might see a different pattern on a log-log scale. We do not. (This plot was not included in the manuscript).
+
+```{r message=FALSE}
+fig_starter(file="N-vs-N-loglog",description = "comparing mark recapture and gaussian estimates",
+            width=8, height=8)
+# par(mfrow=c(1,2))
+plot(log(realsize$total), log(res$N), pch=19,
+     xlab="log mark recapture estimate",
+     ylab="log abundance index",
+     col='cornflowerblue', cex=1.8,
+     cex.lab=1.6, cex.axis=1.6)
+segments(x0=log(realsize$total), 
+         y0=log(res$N.boot16),
+         y1=log(res$N.boot84))
+segments(y0=log(res$N),
+         x0=log(realsize$total+
+                  (realsize$lowcidorm-realsize$total)/qnorm(.975)), 
+         x1=log(realsize$total+
+                  (realsize$uppcidorm-realsize$total)/qnorm(.975)))
+ellipses(x=log(realsize$total), y = log(fl$N), add=TRUE, smooth = F, n = 1, col = "gray60", pch = 21, cex = 1.25, bg = "slateblue", xlab = "", ylab = "", lwd = 2, lty = "dotted", data=F)
+
+dev.off()
+```
+
+![](../5_figs/N-vs-N-loglog.jpg)
+
+## Combining for Fig 2
+
+This combines the past two sets of figures into one, which is Figure 2 in the main text. We use the `split.screen()` to shape our figure, in large part to make text scaling between figures. Expect the following code to look fiddly.
+
+
+```{r message=FALSE}
+fig_starter(file="Fig-2",description = "combining N vs N and first/last approaches",
+            width=5, height=15)
+
+screen.grid = rbind(c(0, 1, 1-1/3, 1),
+                    c(0, 1, 1-2/3, 1-1/3),
+                    c(0, 1, 0, 1/3))
+split.screen(screen.grid)
+
+#par(mfrow=c(3,1), )
+par_fig2=function(){par(mar=c(6.5,6.5,3,3))} #function to set par formatting.
+screen(1)
+par_fig2()
+plot(realsize$total, res$N, pch=19,
+     ylab="",
+     xlab="",
+     ylim=c(0,4200),
+     xlim=c(0,4200),
+     xaxt="n",
+     yaxt="n",
+     col='cornflowerblue', cex=2.5,
+     cex.lab=1.8, cex.axis=1.6)
+title("A.", adj = 0, line=0.4, cex.main=1.6)
+title(ylab="Abundance index\n(butterfly-days)", xpd=TRUE, cex.lab=1.8)
+title(xlab="Mark-recapture estimate\n(population size)", line=4.5, xpd=NA, cex.lab=1.8)
+axis(1, at=(0:4)*1000, labels=c("0","","2000","","4000"), cex.axis=1.6, gap.axis = 0)
+axis(2, at=(0:4)*1000, labels=c("0","","2000","","4000"), cex.axis=1.6, gap.axis = 0)
+segments(x0=realsize$total, 
+         y0=res$N.boot16,
+         y1=res$N.boot84)
+segments(y0=res$N,
+         x0=realsize$total+
+           (realsize$lowcidorm-realsize$total)/qnorm(.975), 
+         x1=realsize$total+
+           (realsize$uppcidorm-realsize$total)/qnorm(.975))
+ellipses(x=realsize$total, y = fl$N, add=TRUE, smooth = F, n = 1, col = "gray60", pch = 21, cex = 1.25, bg = "slateblue", xlab = "", ylab = "", lwd = 2, lty = "dotted", data=F)
+
+
+## Early observations:
+screen(2)
+par_fig2()
+plot(fl$q.1, fl$fst, cex=1+sqrt(realsize$total)/10, pch=19,
+     xlim=c(175, 195),
+     ylim=c(165, 185),
+     col=myblue,
+     xlab="",
+     ylab="Day of first obs",
+     cex.lab=1.6,
+     xaxt='n',
+     yaxt='n',
+     cex.axis=1.6,
+     cex.main=1.5)
+title(xlab="Day of 0.1 quantile\n(beginning of flight period)", line=4.5, xpd=NA, cex.lab=1.8)
+title("B.", adj = 0, line=0.4, cex.main=1.6)
+axis(1, at=c(177,185, 193), labels = doy_2md(c(177,185, 193)), cex.axis=1.6)
+axis(2, at=c(167,175, 183), labels = doy_2md(c(167,175, 183)), cex.axis=1.6)
+points(fl$q.1, fl$fst, pch=21, cex=1+sqrt(realsize$total)/10)
+
+mn.x=mean(fl$q.1)
+mn.y=mean(fl$fst)
+abline(a=mn.y-mn.x, b=1, lwd=2)
+
+## Late observations
+screen(3)
+par_fig2()
+plot(fl$q.9, fl$last, cex=1+sqrt(realsize$total)/10, pch=19,
+     xlim=c(180, 210),
+     ylim=c(190,220),
+     col=myblue,
+     xlab="",
+     ylab="Day of last obs",
+     cex.lab=1.6,
+     cex.axis=1.6,
+     xaxt='n',
+     yaxt='n',
+     # main="Late obs",
+     cex.main=1.5)
+title("C.", adj = 0, line=0.4, cex.main=1.6)
+title(xlab="Day of 0.9 quantile\n(end of flight period)", line=4.5, xpd=NA, cex.lab=1.8)
+points(fl$q.9, fl$last, pch=21, cex=1+sqrt(realsize$total)/10)
+axis(1, at=c(182,195, 208), labels = doy_2md(c(182,195, 208)), cex.axis=1.6)
+axis(2, at=c(192, 205, 218), labels = doy_2md(c(192,205, 218)), cex.axis=1.6)
+mn.x=mean(fl$q.9)
+mn.y=mean(fl$last)
+abline(a=mn.y-mn.x, b=1, lwd=2)
+close.screen(all.screens = TRUE)
+dev.off()
+```
+
+
+
+# Post-hoc analysis
+
+This uses climate data calculated using the climate-cleaner.R script, and stored in 2_data_wrangling. Original data is from [@noaa].
+
+```{r}
+## read in data
+dat.climate=readRDS(here("2_data_wrangling","climate-covar.rds"))
+```
+
+We decided to just look at how $\mu$, flight period, and $N$ scale with GDD on July 1.
+
+## Bootstrapping post-hoc analysis
+
+### day of peak activity
+
+```{r mu analyses}
+# We want the ith row of *each* of the dat.sim items
+#reformat mu values
+mumat=NULL
+for(i.year in 1:length(dat.sim)){
+  mumat=cbind(mumat,dat.sim[[i.year]][,"sim.mu"])
+}
+
+## we'll store results in a matrix w/4 cols: intercept, slope, pint, pslope
+boot.mu=matrix(-99, nrow=nrow(dat.sim[[1]]), ncol=4)
+colnames(boot.mu)=c("int",  "slope", "pint", "pslope")
+
+## gdd.july1
+for(i.row in 1:nrow(boot.mu)){
+  out.cur=lm(mumat[i.row,] ~ dat.climate$gdd.july1)
+  boot.mu[i.row,1:2]=coefficients(out.cur)
+  boot.mu[i.row,3:4]=(summary(out.cur))$coefficients[,4]
+}
+(ci=quantile(boot.mu[,"slope"],c(.025, .975)))
+(ci.p=mean(boot.mu[,"pslope"]<0.05))
+```
+
+Here we see that 95% confidence interval for slope of the relationship between mu and gdd 10 is `r ci`. The proportion of significant p values while bootstrapping was `r round(ci.p*100)`%.
+
+### flight period
+
+```{r fp}
+sdmat=NULL
+for(i.year in 1:length(dat.sim)){
+  sdmat=cbind(sdmat,dat.sim[[i.year]][,"sim.sd"])
+}
+boot.sd=matrix(-99, nrow=nrow(dat.sim[[1]]), ncol=4)
+colnames(boot.sd)=c("int",  "slope", "pint", "pslope")
+## gdd.july1
+for(i.row in 1:nrow(boot.sd)){
+  out.cur=lm(sdmat[i.row,]*fp.mult ~ dat.climate$gdd.july1)
+  boot.sd[i.row,1:2]=coefficients(out.cur)
+  boot.sd[i.row,3:4]=(summary(out.cur))$coefficients[,4]
+}
+(ci=quantile(boot.sd[,"slope"],c(.025, .975)))
+(ci.p=mean(boot.sd[,"pslope"]<0.05))
+```
+
+Here we see the 95% CI for the slope of flight period includes both negative and positive values, and was significant only `r round(ci.p*100)`% of the time.
+
+### abundance index
+
+```{r N}
+Nmat=NULL
+for(i.year in 1:length(dat.sim)){
+  Nmat=cbind(Nmat,dat.sim[[i.year]][,"sim.N"])
+}
+
+
+boot.N=matrix(-99, nrow=nrow(dat.sim[[1]]), ncol=4)
+colnames(boot.N)=c("int",  "slope", "pint", "pslope")
+## gdd.july1
+for(i.row in 1:nrow(boot.N)){
+  out.cur=lm(Nmat[i.row,] ~ dat.climate$gdd.july1)
+  boot.N[i.row,1:2]=coefficients(out.cur)
+  boot.N[i.row,3:4]=(summary(out.cur))$coefficients[,4]
+}
+(ci=quantile(boot.N[,"slope"],c(.025, .975)))
+(ci.p=mean(boot.N[,"pslope"]<0.05))
+```
+
+Here we see the 95% CI for the slope of abundance includes both negative and positive values, and was significant only `r round(ci.p*100)`% of the time.
+
+### .1 quantile ('early')
+
+Does the 0.1 quantile change? We can calculate the 95% confidence intervals using bootstrapping.
+
+```{r early}
+earlymat=NULL
+for(i.year in 1:length(dat.sim)){
+  earlymat=cbind(earlymat,dat.sim[[i.year]][,"sim.mu"]+
+                   qnorm(.1)*dat.sim[[i.year]][,"sim.sd"])
+}
+
+boot.early=matrix(-99, nrow=nrow(dat.sim[[1]]), ncol=4)
+colnames(boot.early)=c("int",  "slope", "pint", "pslope")
+## gdd.july1
+for(i.row in 1:nrow(boot.early)){
+  out.cur=lm(earlymat[i.row,] ~ dat.climate$gdd.july1)
+  boot.early[i.row,1:2]=coefficients(out.cur)
+  boot.early[i.row,3:4]=(summary(out.cur))$coefficients[,4]
+}
+(ci=quantile(boot.early[,"slope"],c(.025, .975)))
+(ci.p=mean(boot.early[,"pslope"]<0.05))
+
+```
+
+The slope was consistently negative, but significant only `r round(ci.p*100)`% of the time.
+
+### .9 quantile ('late')
+
+```{r late}
+latemat=NULL
+for(i.year in 1:length(dat.sim)){
+  latemat=cbind(latemat,dat.sim[[i.year]][,"sim.mu"]+
+                  qnorm(.9)*dat.sim[[i.year]][,"sim.sd"])
+}
+
+boot.late=matrix(-99, nrow=nrow(dat.sim[[1]]), ncol=4)
+colnames(boot.late)=c("int",  "slope", "pint", "pslope")
+## gdd.july1
+for(i.row in 1:nrow(boot.late)){
+  out.cur=lm(latemat[i.row,] ~ dat.climate$gdd.july1)
+  boot.late[i.row,1:2]=coefficients(out.cur)
+  boot.late[i.row,3:4]=(summary(out.cur))$coefficients[,4]
+}
+
+(ci=quantile(boot.late[,"slope"],c(.025, .975)))
+(ci.p=mean(boot.late[,"pslope"]<0.05))
+```
+
+We see a similar story with the 0.8 quantile, but the slopes were significant even less frequently (`r round(ci.p*100)`% of the time).
+
+## Plotting
+
+Here we plot the post-hoc analysis results (used in Figure 3). Expect the following code to look fiddly, as we had to tweak subplot placement and shape.
+
+```{r message=FALSE}
+#for bootstrapped intervals
+reso=500
+x.pred=seq(min(dat.climate$gdd.july1), 
+           max(dat.climate$gdd.july1),
+           length=reso)
+#start figure
+fig_starter(filename = "posthoc-gdd",
+            description=c("Posthoc comparison of phenological metrics and GDD. Bars show +/- 1 SD equivalent"),
+            width = 5,
+            height= 15)
+#set up parameter function
+par_fig3=function(){par(mar=c(5,5.4,3,2))}
+#set up grid plotting
+screen.grid=rbind(c(0, 1, 2/3, 1), #day of peak activty
+                  c(0, 1, 1/3, 2/3), #flight period
+                  c(0, 1, 0, 1/3)) #abundance index
+split.screen(screen.grid)
+
+murange=range(c(res$mu.boot16,res$mu.boot84))
+screen(1); par_fig3()
+plot(dat.climate$gdd.july1, res$mu,
+     xlab="GDD 10 on July 1",
+     ylim=murange,
+     yaxt="n",
+     ylab= "Day of peak activity",
+     pch=19,cex=1.6, col='cornflowerblue',
+     cex.lab=1.8, cex.axis=1.8)
+axis(2, at=c(184, 189, 194), labels=doy_2md(c(184, 189, 194)), cex.axis=1.8)
+title("B.", adj = 0, line=0.4, cex.main=1.8)
+segments(x0=dat.climate$gdd.july1,
+         y0=res$mu.boot16,
+         y1=res$mu.boot84,
+         col='cornflowerblue')
+out=lm(res$mu ~ dat.climate$gdd.july1)
+abline(out); 
+## calculate and add bootstrapped intervals
+grid=matrix(-99,
+            ncol=length(x.pred), 
+            nrow=nrow(boot.mu))
+#look through columns (for speed). Probably a vectorizable way of doing this.
+for(i.col in 1:ncol(grid)){
+  grid[,i.col] = boot.mu[,"int"] + x.pred[i.col]*boot.mu[,"slope"]
+}
+CI=apply(grid,2, quantile, probs= pnorm(c(-1,1)))
+# summary(out)
+points(x.pred,
+       CI[1,],
+       type="l",
+       lty=2)
+points(x.pred,
+       CI[2,],
+       type="l",
+       lty=2)
+
+sdrange=range(c(res$sd.boot16*fp.mult,res$sd.boot84*fp.mult))
+screen(2); par_fig3()
+plot(dat.climate$gdd.july1, res$sd*fp.mult,
+     xlab="GDD 10 on July 1",
+     ylim=sdrange,
+     ylab= "Flight period (days)",
+     pch=19,cex=1.5, col='cornflowerblue',
+     cex.lab=1.8, cex.axis=1.8)
+title("C.", adj = 0, line=0.4, cex.main=1.8)
+segments(x0=dat.climate$gdd.july1,
+         y0=res$sd.boot16*fp.mult,
+         y1=res$sd.boot84*fp.mult,
+         col='cornflowerblue')
+out=lm(I(res$sd*fp.mult) ~ dat.climate$gdd.july1)
+abline(out);
+## CI
+grid=matrix(-99,
+            ncol=length(x.pred), 
+            nrow=nrow(boot.sd))
+#look through columns (for speed). Probably a vectorizable way of doing this.
+for(i.col in 1:ncol(grid)){
+  grid[,i.col] = boot.sd[,"int"] + x.pred[i.col]*boot.sd[,"slope"]
+}
+CI=apply(grid,2, quantile, probs= pnorm(c(-1,1)))
+# summary(out)
+points(x.pred,
+       CI[1,],
+       type="l",
+       lty=2)
+points(x.pred,
+       CI[2,],
+       type="l",
+       lty=2)
+
+Nrange=range(c(res$N.boot16,res$N.boot84))
+screen(3); par_fig3()
+plot(dat.climate$gdd.july1, res$N,
+     xlab="GDD 10 on July 1",
+     ylim=Nrange,
+     ylab= "Abundance index (butterfly-days)",
+     pch=19,cex=1.5, col='cornflowerblue',
+     cex.lab=1.8, cex.axis=1.8)
+title("D.", adj = 0, line=0.4, cex.main=1.8)
+segments(x0=dat.climate$gdd.july1,
+         y0=res$N.boot16,
+         y1=res$N.boot84,
+         col='cornflowerblue')
+out=lm(res$N ~ dat.climate$gdd.july1)
+abline(out);
+#CI
+grid=matrix(-99,
+            ncol=length(x.pred), 
+            nrow=nrow(boot.N))
+#look through columns (for speed). Probably a vectorizable way of doing this.
+for(i.col in 1:ncol(grid)){
+  grid[,i.col] = boot.N[,"int"] + x.pred[i.col]*boot.N[,"slope"]
+}
+CI=apply(grid,2, quantile, probs= pnorm(c(-1,1)))
+# summary(out)
+points(x.pred,
+       CI[1,],
+       type="l",
+       lty=2)
+points(x.pred,
+       CI[2,],
+       type="l",
+       lty=2)
+close.screen(all.screens = TRUE)
+# summary(out)
+dev.off()
+
+```
+
+![](../5_figs/posthoc-gdd.jpg)
+
+## Ridgeline plot (formerly "joyplot")
+
+Here we use ridgeline plots to capture the dynamics across all years, and represent GDD with color. Used in figure 3.
+
+
+```{r}
+## format data
+ridges.x=rep(mod.fits$doy,ncol(mod.fits)-1)
+ridges.y=c(mod.fits$`2012`,
+           mod.fits$`2013`,
+           mod.fits$`2014`,
+           mod.fits$`2015`,
+           mod.fits$`2016`,
+           mod.fits$`2017`,
+           mod.fits$`2018`,
+           mod.fits$`2019`)
+yr=rep(colnames(mod.fits)[-1], each=nrow(mod.fits))
+yr.ht=rep((1:8)*10, each=nrow(mod.fits))
+ridges.df=data.frame(doy=ridges.x,
+                     dens=ridges.y,
+                     year=yr,
+                     yr.ht=yr.ht
+)
+
+ridgeorder=dat.climate[,c("year","gdd.july1")]
+ridgeorder=cbind(ridgeorder, ord=1:8)
+ridgeorder$year=as.character(ridgeorder$year)
+
+dat.merge=res[,c("year", "mu", "sd","N","h")]
+dat.merge$year=as.character(dat.merge$year)
+
+years.dat=merge(ridgeorder,dat.merge)
+dat.use=merge(years.dat,ridges.df)
+
+gfig=ggplot(dat.use, aes(x=doy, 
+                         y=ord, 
+                         height=dens, 
+                         group = year, 
+                         fill=gdd.july1, 
+                         position=ord),
+            position=dat.use$ord) +
+  scale_y_continuous(breaks=years.dat$ord, 
+                     labels=paste(years.dat$year))+
+  scale_x_continuous(breaks=seq(170,200, length=3), 
+                     labels=doy_2md(seq(170,200, length=3)))+
+  geom_density_ridges(stat="identity", scale=1, alpha=.7, rel_min_height=.002)+
+  theme_ridges(grid=TRUE)+
+  labs(x="Day of year",
+       title="A.",
+       y=""
+  )+
+  scale_fill_viridis(name="GDD", option="C")+
+  theme(text=element_text(size=20),
+        axis.text.x = element_text(size=20),
+        axis.text.y = element_text(size=20),
+        plot.title = element_text(size=22, vjust=0),
+        axis.title.x = element_text(size=23, hjust=.45),
+        legend.key.size = unit(.5, "cm"),
+        axis.line = element_line(colour = "black"),
+        plot.margin=unit(c(.6,0,.5,0), unit = "cm")
+  )
+
+gfig_saver(gfig=gfig,
+           filename="ridges-unscaled",
+           description="ridgeline plot of yearly distributions, longform",
+           width = 6,
+           height=15)
+```
+
+![](../5_figs/ridges-unscaled.jpg)
+
+# References
